@@ -31,7 +31,7 @@
  * OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#include <sys/time.h>
+#include <time.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -43,7 +43,6 @@
 #include <stdlib.h>
 #include <stdbool.h>
 #include <errno.h>
-#include <glib.h>
 
 const int tcp_max_size = 1500;
 const int file_max_length = 4096;
@@ -66,6 +65,29 @@ const int http_method_size = 10;
     printf("file \"%s\" requested from %d.%d.%d.%d:%d\n", filename, ip1, ip2, ip3, ip4, port);
 }*/
 
+void add_header_field(char **header, char *field_name, char *field_value)
+{
+    *header = realloc(*header, 3 + sizeof(*header) + strlen(field_name) + strlen(field_value));
+
+    strcat(*header, "\n");
+    strcat(*header, field_name);
+    strcat(*header, ": ");
+    strcat(*header, field_value);
+}
+
+char *create_header(char *http_version, char *http_code, char *http_phrase)
+{
+    char *header = calloc(4 + strlen(http_version) + strlen(http_code) + strlen(http_phrase), 1);
+
+    strcpy(header, http_version);
+    strcat(header, " ");
+    strcat(header, http_code);
+    strcat(header, " ");
+    strcat(header, http_phrase);
+
+    return header;
+}
+
 void getIPPort(struct sockaddr_in addr, int *ip1, int *ip2, int *ip3, int *ip4, int *port)
 {
     *ip1 = addr.sin_addr.s_addr & 0xFF;
@@ -82,8 +104,7 @@ void logRequest(struct sockaddr_in client, char *http_method, char *requested_ur
     int logMessageSize = 64 + strlen(http_method) + strlen(requested_url);
     int count;
     bool success = false;
-    char *logMessage = malloc(logMessageSize);
-    memset(logMessage, 0, logMessageSize);
+    char *logMessage = calloc(logMessageSize, 1);
 
     // Get the IPv4 address and port
     int ip1, ip2, ip3, ip4, port;
@@ -139,9 +160,23 @@ void handle_GET(struct sockaddr_in client, char *http_method, char *requested_ur
     logRequest(client, http_method, requested_url, 200);
 }
 
-void handle_HEAD(struct sockaddr_in client, char *http_method, char *requested_url)
+void handle_HEAD(int connfd, struct sockaddr_in client, char *http_method, char *requested_url)
 {
+    char *header = create_header("HTTP/1.1", "200", "OKspokdfopskdofksdfsdfsdfsdfposd");
+
+    add_header_field(&header, "Content-Length", "6969");
+
+    strcat(header, "\n");
+
+    printf("\nHEADER\n%s\n==========\n", header);
+
     logRequest(client, http_method, requested_url, 200);
+
+    printf("\nHEADER\n%s\n==========\n", header);
+
+    send(connfd, header, sizeof(header), 0);
+
+    free(header);
 }
 
 void handle_POST(struct sockaddr_in client, char *http_method, char *requested_url)
@@ -266,7 +301,7 @@ int main(int argc, char **argv)
             // HEAD Request
             else if (strcmp(http_method, "HEAD") == 0)
             {
-                handle_HEAD(client, http_method, requested_url);
+                handle_HEAD(connfd, client, http_method, requested_url);
             }
             // POST Request
             else if (strcmp(http_method, "POST") == 0)
@@ -279,7 +314,7 @@ int main(int argc, char **argv)
                 handle_other(client, http_method, requested_url);
             }
 
-            message[n] = '\0';
+            //message[n] = '\0';
             //fprintf(stdout, "Received:\n%s\n", message);
 
             // Convert message to upper case.
