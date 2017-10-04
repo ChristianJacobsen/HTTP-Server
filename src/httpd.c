@@ -66,27 +66,92 @@ const int http_method_size = 10;
     printf("file \"%s\" requested from %d.%d.%d.%d:%d\n", filename, ip1, ip2, ip3, ip4, port);
 }*/
 
-void logRequest(struct sockaddr_in client, char *http_method, char *requested_url)
+void getIPPort(struct sockaddr_in addr, int *ip1, int *ip2, int *ip3, int *ip4, int *port)
 {
-    // Construct the IPv4 address
-    int ip1, ip2, ip3, ip4;
-    ip1 = client.sin_addr.s_addr & 0xFF;
-    ip2 = (client.sin_addr.s_addr >> 8) & 0xFF;
-    ip3 = (client.sin_addr.s_addr >> 16) & 0xFF;
-    ip4 = (client.sin_addr.s_addr >> 24) & 0xFF;
+    *ip1 = addr.sin_addr.s_addr & 0xFF;
+    *ip2 = (addr.sin_addr.s_addr >> 8) & 0xFF;
+    *ip3 = (addr.sin_addr.s_addr >> 16) & 0xFF;
+    *ip4 = (addr.sin_addr.s_addr >> 24) & 0xFF;
 
-    // Construct the port
-    int port = (client.sin_port & 0xFF) << 8;
-    port = port | ((client.sin_port >> 8) & 0xFF);
+    *port = (addr.sin_port & 0xFF) << 8;
+    *port = *port | ((addr.sin_port >> 8) & 0xFF);
+}
 
+void logRequest(struct sockaddr_in client, char *http_method, char *requested_url, int status_code)
+{
+    int logMessageSize = 64 + strlen(http_method) + strlen(requested_url);
+    int count;
+    bool success = false;
+    char *logMessage = malloc(logMessageSize);
+    memset(logMessage, 0, logMessageSize);
+
+    // Get the IPv4 address and port
+    int ip1, ip2, ip3, ip4, port;
+    getIPPort(client, &ip1, &ip2, &ip3, &ip4, &port);
+
+    // Construct the timestamp
+    // Source: https://stackoverflow.com/questions/1442116/how-to-get-date-and-time-value-in-c-program
     time_t t = time(NULL);
     struct tm tm = *localtime(&t);
 
-    printf("%d-%d-%d %d:%d:%d : ", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec);
+    count = snprintf(logMessage, logMessageSize, "%d-%02d-%02dT%02d:%02d:%02dZ : ", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec);
 
-    printf("%d.%d.%d.%d:%d ", ip1, ip2, ip3, ip4, port);
+    if (0 <= count && count <= logMessageSize)
+    {
+        // Construct the IP and port
+        count += snprintf(logMessage + count, logMessageSize - count, "<%d.%d.%d.%d>:<%d> ", ip1, ip2, ip3, ip4, port);
 
-    printf("%s %s : %d\n", http_method, requested_url, 200);
+        if (0 <= count && count <= logMessageSize)
+        {
+            // Construct the HTTP method, request URL and response code
+            count = snprintf(logMessage + count, logMessageSize - count, "<%s> <%s> : <%d>", http_method, requested_url, status_code);
+            success = true;
+        }
+    }
+
+    if (success)
+    {
+        printf("%s\n", logMessage);
+
+        FILE *fp = NULL;
+        fp = fopen("httpd_logfile", "a");
+
+        if (fp != NULL)
+        {
+            fprintf(fp, "%s\n", logMessage);
+            fclose(fp);
+        }
+        else
+        {
+            printf("ERROR: Could not open log file\nErrno: %d\n", errno);
+        }
+    }
+    else
+    {
+        printf("ERROR: Could not construct log message\n");
+    }
+
+    free(logMessage);
+}
+
+void handle_GET(struct sockaddr_in client, char *http_method, char *requested_url)
+{
+    logRequest(client, http_method, requested_url, 200);
+}
+
+void handle_HEAD(struct sockaddr_in client, char *http_method, char *requested_url)
+{
+    logRequest(client, http_method, requested_url, 200);
+}
+
+void handle_POST(struct sockaddr_in client, char *http_method, char *requested_url)
+{
+    logRequest(client, http_method, requested_url, 200);
+}
+
+void handle_other(struct sockaddr_in client, char *http_method, char *requested_url)
+{
+    logRequest(client, http_method, requested_url, 501);
 }
 
 int main(int argc, char **argv)
@@ -114,12 +179,29 @@ int main(int argc, char **argv)
     server.sin_family = AF_INET;
     server.sin_addr.s_addr = htonl(INADDR_ANY);
     server.sin_port = htons(port);
-    bind(sockfd, (struct sockaddr *)&server, (socklen_t)sizeof(server));
+
+    // Bind the socket
+    if (bind(sockfd, (struct sockaddr *)&server, (socklen_t)sizeof(server)) != 0)
+    {
+        // Port in use
+        if (errno == EADDRINUSE)
+        {
+            printf("Port number already in use: %d\n", port);
+            return -1;
+        }
+        // Unknown error
+        else
+        {
+            printf("Unknown error binding the socket. errno: %d\n", errno);
+            return -1;
+        }
+    }
 
     // Before the server can accept messages, it has to listen to the
     // welcome port. A backlog of one connection is allowed.
     listen(sockfd, 1);
 
+    // Notify that the server is ready
     printf("Listening on port %d...\n", port);
 
     for (;;)
@@ -176,28 +258,25 @@ int main(int argc, char **argv)
                 }
             }
 
-            logRequest(client, http_method, requested_url);
-
             // GET Request
             if (strcmp(http_method, "GET") == 0)
             {
-                printf("GET Request\n");
-                printf("URL: %s\n", requested_url);
+                handle_GET(client, http_method, requested_url);
             }
             // HEAD Request
             else if (strcmp(http_method, "HEAD") == 0)
             {
-                printf("HEAD Request\n");
+                handle_HEAD(client, http_method, requested_url);
             }
             // POST Request
             else if (strcmp(http_method, "POST") == 0)
             {
-                printf("POST Request\n");
+                handle_POST(client, http_method, requested_url);
             }
             // Not supported request
             else
             {
-                printf("WTF Request\n");
+                handle_other(client, http_method, requested_url);
             }
 
             message[n] = '\0';
