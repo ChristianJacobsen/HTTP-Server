@@ -32,13 +32,13 @@
  */
 
 #include <time.h>
+#include <sys/time.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <ctype.h>
 #include <string.h>
 #include <unistd.h>
-#include <stdio.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
@@ -47,6 +47,7 @@
 const int tcp_max_size = 1500;
 const int file_max_length = 4096;
 const int http_method_size = 10;
+const int ipv4_url_max_size = 19;
 
 /*void print_RRQ_message(char *filename, )
 {
@@ -64,6 +65,26 @@ const int http_method_size = 10;
     // Print
     printf("file \"%s\" requested from %d.%d.%d.%d:%d\n", filename, ip1, ip2, ip3, ip4, port);
 }*/
+
+void get_ip_port(struct sockaddr_in addr, int *ip1, int *ip2, int *ip3, int *ip4, int *port)
+{
+    *ip1 = addr.sin_addr.s_addr & 0xFF;
+    *ip2 = (addr.sin_addr.s_addr >> 8) & 0xFF;
+    *ip3 = (addr.sin_addr.s_addr >> 16) & 0xFF;
+    *ip4 = (addr.sin_addr.s_addr >> 24) & 0xFF;
+
+    *port = (addr.sin_port & 0xFF) << 8;
+    *port = *port | ((addr.sin_port >> 8) & 0xFF);
+}
+
+void add_body(char **header, char *body)
+{
+    *header = realloc(*header, 3 + strlen(*header) + strlen(body));
+
+    strcat(*header, "\n");
+    strcat(*header, body);
+    strcat(*header, "\n");
+}
 
 void add_header_field(char **header, char *field_name, char *field_value)
 {
@@ -88,18 +109,55 @@ char *create_header(char *http_version, char *http_code, char *http_phrase)
     return header;
 }
 
-void getIPPort(struct sockaddr_in addr, int *ip1, int *ip2, int *ip3, int *ip4, int *port)
+char *create_html(struct sockaddr_in client, char *requested_url)
 {
-    *ip1 = addr.sin_addr.s_addr & 0xFF;
-    *ip2 = (addr.sin_addr.s_addr >> 8) & 0xFF;
-    *ip3 = (addr.sin_addr.s_addr >> 16) & 0xFF;
-    *ip4 = (addr.sin_addr.s_addr >> 24) & 0xFF;
+    char *html_start = "<!DOCTYPE html>\n<html lang=\"en\">\n\t<head>\n\t\t<title>HTTP Server response</title>\n\t\t<meta charset=\"UTF-8\">\n\t\t<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\t</head>\n\t<body>\n\t\thttp://foo.com";
+    char *html_end = "\n\t</body>\n</html>";
+    char *body_content = calloc(43 + strlen(requested_url), 1);
+    char client_URL[ipv4_url_max_size];
 
-    *port = (addr.sin_port & 0xFF) << 8;
-    *port = *port | ((addr.sin_port >> 8) & 0xFF);
+    // Get the IPv4 address and port of client
+    int client_ip1, client_ip2, client_ip3, client_ip4, client_port;
+    get_ip_port(client, &client_ip1, &client_ip2, &client_ip3, &client_ip4, &client_port);
+
+    snprintf(client_URL, ipv4_url_max_size, "%d.%d.%d.%d:%d", client_ip1, client_ip2, client_ip3, client_ip4, client_port);
+
+    strcpy(body_content, requested_url);
+    strcat(body_content, " ");
+    strcat(body_content, client_URL);
+
+    char *html_complete = calloc(strlen(html_start) + strlen(body_content) + strlen(html_end) + 1, 1);
+
+    strcpy(html_complete, html_start);
+    strcat(html_complete, body_content);
+    strcat(html_complete, html_end);
+
+    return html_complete;
 }
 
-void logRequest(struct sockaddr_in client, char *http_method, char *requested_url, int status_code)
+char *create_response(bool is_head, struct sockaddr_in client, char *requested_url)
+{
+    char html_size[1024];
+
+    char *html = create_html(client, requested_url);
+
+    snprintf(html_size, strlen(html), "%d", (int)strlen(html));
+
+    char *header = create_header("HTTP/1.1", "200", "OK");
+
+    add_header_field(&header, "Content-Length", html_size);
+    add_header_field(&header, "Content-Type", "text/html");
+    strcat(header, "\n");
+
+    if (!is_head)
+    {
+        add_body(&header, html);
+    }
+
+    return header;
+}
+
+void log_request(struct sockaddr_in client, char *http_method, char *requested_url, int status_code)
 {
     int logMessageSize = 64 + strlen(http_method) + strlen(requested_url);
     int count;
@@ -108,7 +166,7 @@ void logRequest(struct sockaddr_in client, char *http_method, char *requested_ur
 
     // Get the IPv4 address and port
     int ip1, ip2, ip3, ip4, port;
-    getIPPort(client, &ip1, &ip2, &ip3, &ip4, &port);
+    get_ip_port(client, &ip1, &ip2, &ip3, &ip4, &port);
 
     // Construct the timestamp
     // Source: https://stackoverflow.com/questions/1442116/how-to-get-date-and-time-value-in-c-program
@@ -155,38 +213,36 @@ void logRequest(struct sockaddr_in client, char *http_method, char *requested_ur
     free(logMessage);
 }
 
-void handle_GET(struct sockaddr_in client, char *http_method, char *requested_url)
+void handle_GET(int connfd, struct sockaddr_in client, char *http_method, char *requested_url)
 {
-    logRequest(client, http_method, requested_url, 200);
+    char *header = create_response(false, client, requested_url);
+
+    log_request(client, http_method, requested_url, 200);
+
+    send(connfd, header, strlen(header), 0);
+
+    free(header);
 }
 
 void handle_HEAD(int connfd, struct sockaddr_in client, char *http_method, char *requested_url)
 {
-    char *header = create_header("HTTP/1.1", "200", "OKspokdfopskdofksdfsdfsdfsdfposd");
+    char *header = create_response(true, client, requested_url);
 
-    add_header_field(&header, "Content-Length", "6969");
+    log_request(client, http_method, requested_url, 200);
 
-    strcat(header, "\n");
-
-    printf("\nHEADER\n%s\n==========\n", header);
-
-    logRequest(client, http_method, requested_url, 200);
-
-    printf("\nHEADER\n%s\n==========\n", header);
-
-    send(connfd, header, sizeof(header), 0);
+    send(connfd, header, strlen(header), 0);
 
     free(header);
 }
 
 void handle_POST(struct sockaddr_in client, char *http_method, char *requested_url)
 {
-    logRequest(client, http_method, requested_url, 200);
+    log_request(client, http_method, requested_url, 200);
 }
 
 void handle_other(struct sockaddr_in client, char *http_method, char *requested_url)
 {
-    logRequest(client, http_method, requested_url, 501);
+    log_request(client, http_method, requested_url, 501);
 }
 
 int main(int argc, char **argv)
@@ -296,7 +352,7 @@ int main(int argc, char **argv)
             // GET Request
             if (strcmp(http_method, "GET") == 0)
             {
-                handle_GET(client, http_method, requested_url);
+                handle_GET(connfd, client, http_method, requested_url);
             }
             // HEAD Request
             else if (strcmp(http_method, "HEAD") == 0)
