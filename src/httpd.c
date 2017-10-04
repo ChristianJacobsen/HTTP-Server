@@ -67,7 +67,7 @@ const int http_method_size = 10;
 
 void add_header_field(char **header, char *field_name, char *field_value)
 {
-    *header = realloc(*header, 3 + sizeof(*header) + strlen(field_name) + strlen(field_value));
+    *header = realloc(*header, 4 + strlen(*header) + strlen(field_name) + strlen(field_value));
 
     strcat(*header, "\n");
     strcat(*header, field_name);
