@@ -37,6 +37,7 @@ ge on port 32000, turn it into upper case and return
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <ctype.h>
 #include <string.h>
 #include <unistd.h>
@@ -45,6 +46,8 @@ ge on port 32000, turn it into upper case and return
 #include <stdbool.h>
 #include <errno.h>
 #include <poll.h>
+#include <sys/poll.h>
+#include <sys/ioctl.h>
 
 const int tcp_max_size = 1500;
 const int file_max_length = 4096;
@@ -68,6 +71,22 @@ const int ipv4_url_max_size = 19;
     printf("file \"%s\" requested from %d.%d.%d.%d:%d\n", filename, ip1, ip2, ip3, ip4, port);
 }*/
 
+// Source: https://stackoverflow.com/questions/31426420/configuring-tcp-keepalive-after-accept
+void enable_keepalive(int sock)
+{
+    int yes = 1;
+    setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, &yes, sizeof(int));
+
+    int idle = 1;
+    setsockopt(sock, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof(int));
+
+    int interval = 1;
+    setsockopt(sock, IPPROTO_TCP, TCP_KEEPINTVL, &interval, sizeof(int));
+
+    int maxpkt = 10;
+    setsockopt(sock, IPPROTO_TCP, TCP_KEEPCNT, &maxpkt, sizeof(int));
+}
+
 void get_ip(struct sockaddr_in addr, int *ip1, int *ip2, int *ip3, int *ip4)
 {
     *ip1 = addr.sin_addr.s_addr & 0xFF;
@@ -82,14 +101,14 @@ void get_port(struct sockaddr_in addr, int *port)
     *port = *port | ((addr.sin_port >> 8) & 0xFF);
 }
 
-char *get_message_body(char* message, ssize_t n)
+char *get_message_body(char *message, ssize_t n)
 {
     // Find 2 consecutive new-lines
     message[n] = '\0';
     int i;
     for (i = 0; i < n; i++)
     {
-        if (message[i] == '\n' && message[i+1] == '\n')
+        if (message[i] == '\n' && message[i + 1] == '\n')
         {
             i += 2;
             break;
@@ -139,7 +158,7 @@ char *create_html(struct sockaddr_in server, struct sockaddr_in client, char *re
     char *html_end = "\n\t</body>\n</html>";
     char server_URL[ipv4_url_max_size];
     char client_URL[ipv4_url_max_size];
-    
+
     int message_body_size = (message_body == NULL ? 0 : strlen(message_body) + 1);
     char *body_content = calloc(43 + strlen(requested_url) + message_body_size, 1);
 
@@ -277,12 +296,12 @@ void handle_HEAD(int connfd, struct sockaddr_in server, struct sockaddr_in clien
     free(header);
 }
 
-void handle_POST(int connfd, struct sockaddr_in server, struct sockaddr_in client, char *http_method, char *requested_url, char* message, ssize_t n)
+void handle_POST(int connfd, struct sockaddr_in server, struct sockaddr_in client, char *http_method, char *requested_url, char *message, ssize_t n)
 {
     char *message_body = get_message_body(message, n);
 
     char *header = create_response(false, server, client, requested_url, message_body);
-    
+
     log_request(client, http_method, requested_url, 200);
 
     send(connfd, header, strlen(header), 0);
@@ -312,13 +331,48 @@ int main(int argc, char **argv)
 
     int port = atoi(argv[1]);
     int sockfd;
-    struct sockaddr_in server, client;
+    int on = 1;
+    int timeout;
+    struct sockaddr_in server;
+    socklen_t len = (socklen_t)sizeof(server);
     char message[tcp_max_size];
     char requested_url[file_max_length];
     char http_method[http_method_size];
+    struct pollfd fds[200];
+    struct sockaddr_in clients[200];
+    int nfds = 1;
+    int current_size = 0;
+    bool end_server = false;
+    bool close_connection = false;
+    bool compress_array = false;
 
     // Create and bind a TCP socket.
     sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (sockfd < 0)
+    {
+        printf("Unable to bind the socket. errno: %d\nExiting...\n", errno);
+        return -1;
+    }
+
+    if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, (char *)&on, sizeof(on)) < 0)
+    {
+        printf("setsockopt failed. errno: %d\nExiting...\n", errno);
+        close(sockfd);
+        return -1;
+    }
+
+    // Receives should timeout after 5 seconds.
+    struct timeval timeout2;
+    timeout2.tv_sec = 5;
+    timeout2.tv_usec = 0;
+    setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &timeout2, sizeof(timeout2));
+
+    if (ioctl(sockfd, FIONBIO, (char *)&on) < 0)
+    {
+        printf("ioctl failed. errno: %d\nExiting...\n", errno);
+        close(sockfd);
+        exit(-1);
+    }
 
     // Network functions need arguments in network byte order instead of
     // host byte order. The macros htonl, htons convert the values.
@@ -345,17 +399,251 @@ int main(int argc, char **argv)
     }
 
     // Before the server can accept messages, it has to listen to the
-    // welcome port. A backlog of one connection is allowed.
-    listen(sockfd, 1);
+    // welcome port. A backlog of 32 connections is allowed.
+    if (listen(sockfd, 32) < 0)
+    {
+        printf("listen failed. errno: %d\nExiting...\n", errno);
+        close(sockfd);
+        return -1;
+    }
+
+    memset(fds, 0, sizeof(fds));
+    memset(clients, 0, sizeof(clients));
+
+    fds[0].fd = sockfd;
+    fds[0].events = POLLIN;
+
+    // 10 seconds
+    timeout = (10 * 1000);
 
     // Notify that the server is ready
     printf("Listening on port %d...\n", port);
 
-    for (;;)
+    while (!end_server)
     {
+
+        int poll_value = poll(fds, nfds, timeout);
+        if (poll_value < 0)
+        {
+            printf("poll failed. errno: %d\nExiting...\n", errno);
+            break;
+        }
+        else if (poll_value == 0)
+        {
+            // Poll timeout, continue
+            printf("Poll timeout\n");
+            continue;
+        }
+
+        current_size = nfds;
+        for (int i = 0; i < current_size; i++)
+        {
+            close_connection = false;
+
+            if (fds[i].revents == 0)
+            {
+                continue;
+            }
+
+            if (fds[i].revents & POLLHUP)
+            {
+                printf("Client closing connection normally...\n");
+                close_connection = true;
+            }
+
+            if (fds[i].revents != POLLIN && fds[i].revents != POLLHUP && fds[i].revents != (POLLIN | POLLHUP))
+            {
+                printf("Error, revents was not POLLIN or POLLHUP\n");
+                close_connection = true;
+            }
+
+            if (close_connection)
+            {
+                shutdown(fds[i].fd, SHUT_RDWR);
+                close(fds[i].fd);
+                fds[i].fd = -1;
+                compress_array = true;
+
+                continue;
+            }
+
+            if (fds[i].fd == sockfd)
+            {
+                int connfd;
+
+                do
+                {
+                    //struct sockaddr_in client;
+                    connfd = accept(sockfd, (struct sockaddr *)&clients[nfds], &len);
+
+                    if (connfd < 0)
+                    {
+                        if (errno != EWOULDBLOCK)
+                        {
+                            printf("accept failed. Unknown error. errno: %d\nExiting...\n", errno);
+                            end_server = true;
+                        }
+
+                        break;
+                    }
+
+                    printf("Adding new connection...\n");
+
+                    struct timeval timeout;
+                    timeout.tv_sec = 5;
+                    timeout.tv_usec = 0;
+                    setsockopt(connfd, SOL_SOCKET, SO_RCVTIMEO, (char *)&timeout, sizeof(timeout));
+
+                    struct timeval timeout3;
+                    socklen_t timeout_size;
+
+                    memset(&timeout3, 0, sizeof(timeout3));
+                    memset(&timeout_size, 0, sizeof(timeout_size));
+
+                    int s = getsockopt(connfd, SOL_SOCKET, SO_RCVTIMEO, (char *)&timeout3, &timeout_size);
+                    printf("Get Success: %d. tv_sec: %ld. tv_usec: %d. size: %d\n", s, timeout3.tv_sec, timeout3.tv_usec, timeout_size);
+
+                    fds[nfds].fd = connfd;
+                    fds[nfds].events = POLLIN;
+                    nfds++;
+                } while (connfd != -1);
+            }
+            else
+            {
+                while (true)
+                {
+                    close_connection = false;
+                    memset(&message, 0, sizeof(message));
+                    memset(&http_method, 0, sizeof(http_method));
+                    memset(&requested_url, 0, sizeof(requested_url));
+
+                    // struct timeval timeout2;
+                    // timeout2.tv_sec = 5;
+                    // timeout2.tv_usec = 0;
+                    // int s = setsockopt(fds[i].fd, SOL_SOCKET, SO_RCVTIMEO, &timeout2, sizeof(timeout2));
+                    // printf("Set Success: %d. tv_sec: %ld. tv_usec: %d.\n", s, timeout2.tv_sec, timeout2.tv_usec);
+
+                    // struct timeval timeout3;
+                    // socklen_t timeout_size;
+
+                    // memset(&timeout3, 0, sizeof(timeout3));
+                    // memset(&timeout_size, 0, sizeof(timeout_size));
+
+                    // s = getsockopt(fds[i].fd, SOL_SOCKET, SO_RCVTIMEO, &timeout3, &timeout_size);
+                    // printf("Get Success: %d. tv_sec: %ld. tv_usec: %d. size: %d\n", s, timeout3.tv_sec, timeout3.tv_usec, timeout_size);
+
+                    ssize_t n = recv(fds[i].fd, message, sizeof(message) - 1, 0);
+
+                    if (n < 0)
+                    {
+                        if (errno == EAGAIN || errno == EWOULDBLOCK)
+                        {
+                            // Timeout -> close connection
+                            printf("Client timed out, closing...\n");
+                            //close_connection = true;
+                        }
+                        else
+                        {
+                            printf("recv failed. Unknown error. errno: %d\nExiting...\n", errno);
+                            close_connection = true;
+                        }
+
+                        break;
+                    }
+
+                    if (n == 0)
+                    {
+                        close_connection = true;
+                        break;
+                    }
+
+                    // Assign HTTP method
+                    int it = 0;
+                    for (int i = 0; i < http_method_size; i++)
+                    {
+                        if (message[i] == ' ' || i == http_method_size - 1)
+                        {
+                            http_method[i] = '\0';
+                            it = i + 1;
+                            break;
+                        }
+                        else
+                        {
+                            http_method[i] = message[i];
+                        }
+                    }
+
+                    // Assign requested URL
+                    for (int i = 0; i < file_max_length; i++)
+                    {
+                        if (message[it] == ' ' || i == file_max_length - 1)
+                        {
+                            requested_url[i] = '\0';
+                            break;
+                        }
+                        else
+                        {
+                            requested_url[i] = message[it];
+                            it++;
+                        }
+                    }
+
+                    // GET Request
+                    if (strcmp(http_method, "GET") == 0)
+                    {
+                        handle_GET(fds[i].fd, server, clients[i], http_method, requested_url);
+                    }
+                    // HEAD Request
+                    else if (strcmp(http_method, "HEAD") == 0)
+                    {
+                        handle_HEAD(fds[i].fd, server, clients[i], http_method, requested_url);
+                    }
+                    // POST Request
+                    else if (strcmp(http_method, "POST") == 0)
+                    {
+                        handle_POST(fds[i].fd, server, clients[i], http_method, requested_url, message, n);
+                    }
+                    // Not supported request
+                    else
+                    {
+                        handle_other(fds[i].fd, clients[i], http_method, requested_url);
+                        close_connection = true;
+                    }
+                }
+
+                if (close_connection)
+                {
+                    printf("Closing connection normally...\n");
+                    shutdown(fds[i].fd, SHUT_RDWR);
+                    close(fds[i].fd);
+                    fds[i].fd = -1;
+                    compress_array = true;
+                }
+            }
+        }
+
+        if (compress_array)
+        {
+            printf("Number of fds: %d. Compressing array...\n", nfds);
+            compress_array = false;
+            for (int i = 0; i < nfds; i++)
+            {
+                if (fds[i].fd == -1)
+                {
+                    for (int j = i; j < nfds; j++)
+                    {
+                        fds[j].fd = fds[j + 1].fd;
+                    }
+                    i--;
+                    nfds--;
+                }
+            }
+            printf("Number of fds: %d\n", nfds);
+        }
+
+        /*
         // We first have to accept a TCP connection, connfd is a fresh
         // handle dedicated to this connection.
-        socklen_t len = (socklen_t)sizeof(client);
         int connfd = accept(sockfd, (struct sockaddr *)&client, &len);
 
         // Receives should timeout after 30 seconds.
@@ -445,5 +733,15 @@ int main(int argc, char **argv)
         // Close the connection.
         shutdown(connfd, SHUT_RDWR);
         close(connfd);
+        */
+    }
+
+    for (int i = 0; i < nfds; i++)
+    {
+        if (fds[i].fd >= 0)
+        {
+            shutdown(fds[i].fd, SHUT_RDWR);
+            close(fds[i].fd);
+        }
     }
 }
