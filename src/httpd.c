@@ -49,10 +49,10 @@ ge on port 32000, turn it into upper case and return
 #include <sys/poll.h>
 #include <sys/ioctl.h>
 
-#define TCP_KEEPINIT 128  /* N, time to establish connection */
-#define TCP_KEEPIDLE 256  /* L,N,X start keeplives after this period */
-#define TCP_KEEPINTVL 512 /* L,N interval between keepalives */
-#define TCP_KEEPCNT 1024  /* L,N number of keepalives before close */
+// #define TCP_KEEPINIT 128  /* N, time to establish connection */
+// #define TCP_KEEPIDLE 256  /* L,N,X start keeplives after this period */
+// #define TCP_KEEPINTVL 512 /* L,N interval between keepalives */
+// #define TCP_KEEPCNT 1024  /* L,N number of keepalives before close */
 
 const int tcp_max_size = 1500;
 const int file_max_length = 4096;
@@ -78,20 +78,20 @@ const int max_connections = 200;
 }*/
 
 // Source: https://stackoverflow.com/questions/31426420/configuring-tcp-keepalive-after-accept
-void enable_keepalive(int sock)
-{
-    int yes = 1;
-    setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, &yes, sizeof(int));
+// void enable_keepalive(int sock)
+// {
+//     int yes = 1;
+//     setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, &yes, sizeof(int));
 
-    int idle = 1;
-    setsockopt(sock, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof(int));
+//     int idle = 1;
+//     setsockopt(sock, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof(int));
 
-    int interval = 1;
-    setsockopt(sock, IPPROTO_TCP, TCP_KEEPINTVL, &interval, sizeof(int));
+//     int interval = 1;
+//     setsockopt(sock, IPPROTO_TCP, TCP_KEEPINTVL, &interval, sizeof(int));
 
-    int maxpkt = 10;
-    setsockopt(sock, IPPROTO_TCP, TCP_KEEPCNT, &maxpkt, sizeof(int));
-}
+//     int maxpkt = 10;
+//     setsockopt(sock, IPPROTO_TCP, TCP_KEEPCNT, &maxpkt, sizeof(int));
+// }
 
 void close_connection(int *connfd, bool *compress_array)
 {
