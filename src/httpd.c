@@ -57,25 +57,9 @@ ge on port 32000, turn it into upper case and return
 const int tcp_max_size = 1500;
 const int file_max_length = 4096;
 const int http_method_size = 10;
+const int http_version_size = 9;
 const int ipv4_url_max_size = 19;
 const int max_connections = 200;
-
-/*void print_RRQ_message(char *filename, )
-{
-    // Construct the IPv4 address
-    int ip1, ip2, ip3, ip4;
-    ip1 = client.sin_addr.s_addr & 0xFF;
-    ip2 = (client.sin_addr.s_addr >> 8) & 0xFF;
-    ip3 = (client.sin_addr.s_addr >> 16) & 0xFF;
-    ip4 = (client.sin_addr.s_addr >> 24) & 0xFF;
-
-    // Construct the port
-    int port = (client.sin_port & 0xFF) << 8;
-    port = port | ((client.sin_port >> 8) & 0xFF);
-
-    // Print
-    printf("file \"%s\" requested from %d.%d.%d.%d:%d\n", filename, ip1, ip2, ip3, ip4, port);
-}*/
 
 // Source: https://stackoverflow.com/questions/31426420/configuring-tcp-keepalive-after-accept
 // void enable_keepalive(int sock)
@@ -102,6 +86,25 @@ void close_connection(int *connfd, bool *compress_array)
     if (compress_array != NULL)
     {
         *compress_array = true;
+    }
+}
+
+char* get_header_field_value(char* header, char* header_field)
+{
+    
+}
+
+void lowercase_header(char* message)
+{
+    int i = 0;
+    while(i+3 < tcp_max_size)
+    {
+        if (message[i] == '\r' && message[i+1] == '\n' && message[i+2] == '\r' && message[i+3] == '\n')
+        {
+            break;
+        }
+
+        message[i] = tolower(message[i]);
     }
 }
 
@@ -172,7 +175,7 @@ char *create_header(char *http_version, char *http_code, char *http_phrase)
 char *create_html(struct sockaddr_in server, struct sockaddr_in client, char *requested_url, char *message_body)
 {
     char *html_start = "<!DOCTYPE html>\n<html lang=\"en\">\n\t<head>\n\t\t<title>HTTP Server response</title>\n\t\t<meta charset=\"UTF-8\">\n\t\t<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\t</head>\n\t<body>\n\t\t";
-    char *html_end = "\n\t</body>\n</html>";
+    char *html_end = "\n\t</body>\n</html>\n";
     char server_URL[ipv4_url_max_size];
     char client_URL[ipv4_url_max_size];
 
@@ -355,6 +358,7 @@ int main(int argc, char **argv)
     char message[tcp_max_size];
     char requested_url[file_max_length];
     char http_method[http_method_size];
+    char http_version[http_version_size];
     struct pollfd fds[max_connections];
     struct sockaddr_in clients[max_connections];
     int nfds = 1;
@@ -416,8 +420,8 @@ int main(int argc, char **argv)
     }
 
     // Before the server can accept messages, it has to listen to the
-    // welcome port. A backlog of 32 connections is allowed.
-    if (listen(sockfd, max_connections - 1) < 0)
+    // welcome port. A backlog of 10 connections is allowed.
+    if (listen(sockfd, 10) < 0)
     {
         printf("listen failed. errno: %d\nExiting...\n", errno);
         close(sockfd);
@@ -457,14 +461,17 @@ int main(int argc, char **argv)
         {
             close_conn = false;
 
+            // printf("Connection: %d, revents: %d\n", i, fds[i].revents);
+
             if (fds[i].revents == 0)
             {
+                //printf("DEBUG: revents is 0, not doing shit for this one.\n");
                 continue;
             }
 
             if (fds[i].revents & POLLHUP)
             {
-                printf("Client closing connection normally...\n");
+                printf("Client closing connection via POLLHUP...\n");
                 close_conn = true;
             }
 
@@ -484,44 +491,38 @@ int main(int argc, char **argv)
             if (fds[i].fd == sockfd)
             {
                 int connfd;
+                //struct sockaddr_in client;
+                connfd = accept(sockfd, (struct sockaddr *)&clients[nfds], &len);
 
-                do
+                if (connfd < 0)
                 {
-                    //struct sockaddr_in client;
-                    connfd = accept(sockfd, (struct sockaddr *)&clients[nfds], &len);
-
-                    if (connfd < 0)
+                    if (errno != EWOULDBLOCK)
                     {
-                        if (errno != EWOULDBLOCK)
-                        {
-                            printf("accept failed. Unknown error. errno: %d\nExiting...\n", errno);
-                            end_server = true;
-                        }
-
-                        break;
+                        printf("accept failed. Unknown error. errno: %d\nExiting...\n", errno);
+                        end_server = true;
                     }
 
-                    printf("Adding new connection...\n");
+                    break;
+                }
 
-                    if (nfds == max_connections - 1)
-                    {
-                        printf("Maximum connections reached, rejecting...\n");
-                        shutdown(connfd, SHUT_RDWR);
+                printf("Adding new connection...\n");
 
-                        break;
-                    }
+                if (nfds == max_connections - 1)
+                {
+                    printf("Maximum connections reached, rejecting...\n");
+                    shutdown(connfd, SHUT_RDWR);
 
-                    struct timeval timeout;
-                    timeout.tv_sec = 20;
-                    timeout.tv_usec = 0;
-                    setsockopt(connfd, SOL_SOCKET, SO_RCVTIMEO, (char *)&timeout, sizeof(timeout));
+                    break;
+                }
 
-                    //enable_keepalive(connfd);
+                struct timeval timeout;
+                timeout.tv_sec = 5;
+                timeout.tv_usec = 0;
+                setsockopt(connfd, SOL_SOCKET, SO_RCVTIMEO, (char *)&timeout, sizeof(timeout));
 
-                    fds[nfds].fd = connfd;
-                    fds[nfds].events = POLLIN;
-                    nfds++;
-                } while (connfd != -1);
+                fds[nfds].fd = connfd;
+                fds[nfds].events = POLLIN | POLLHUP;
+                nfds++;
             }
             else
             {
@@ -531,6 +532,7 @@ int main(int argc, char **argv)
                     memset(&message, 0, sizeof(message));
                     memset(&http_method, 0, sizeof(http_method));
                     memset(&requested_url, 0, sizeof(requested_url));
+                    memset(&http_version, 0, sizeof(http_version));
 
                     // struct timeval timeout2;
                     // timeout2.tv_sec = 5;
@@ -549,11 +551,22 @@ int main(int argc, char **argv)
 
                     ssize_t n = recv(fds[i].fd, message, sizeof(message) - 1, 0);
 
-                    printf("DEBUG: Received:\n%s\n", message);
+                    // int max = 1000;
+                    // printf("\n=== DEBUG MESSAGE ===\n");
+                    
+                    // printf("%s", message);
 
-                    if (n < 0)
+                    // printf("\n============\n\n");
+
+                    // printf("DEBUG: Received:\n%s\n", message);
+
+                    if (n <= 0)
                     {
-                        if (errno == EAGAIN || errno == EWOULDBLOCK)
+                        if (n == 0)
+                        {
+                            printf("Client closed connection.\n");
+                        }
+                        else if (errno == EAGAIN || errno == EWOULDBLOCK)
                         {
                             // Timeout -> close connection
                             printf("Client timed out, closing connection...\n");
@@ -567,18 +580,11 @@ int main(int argc, char **argv)
                         break;
                     }
 
-                    if (n == 0)
-                    {
-                        printf("Client closed connection.\n");
-                        close_conn = true;
-                        break;
-                    }
-
                     // Assign HTTP method
                     int it = 0;
                     for (int i = 0; i < http_method_size; i++)
                     {
-                        if (message[i] == ' ' || i == http_method_size - 1)
+                        if (message[i] == ' ' || message[i] == '\r' || message[i] == '\n' || i == http_method_size - 1)
                         {
                             http_method[i] = '\0';
                             it = i + 1;
@@ -593,7 +599,7 @@ int main(int argc, char **argv)
                     // Assign requested URL
                     for (int i = 0; i < file_max_length; i++)
                     {
-                        if (message[it] == ' ' || i == file_max_length - 1)
+                        if (message[it] == ' ' || message[i] == '\r' || message[i] == '\n' || i == file_max_length - 1)
                         {
                             requested_url[i] = '\0';
                             break;
@@ -604,6 +610,23 @@ int main(int argc, char **argv)
                             it++;
                         }
                     }
+
+                    // Assign HTTP version
+                    for (int i = 0; i < http_version_size; i++)
+                    {
+                        if (message[it] == ' ' || message[i] == '\r' || message[i] == '\n' || i == http_version_size - 1)
+                        {
+                            http_version[i] = '\0';
+                            break;
+                        }
+                        else
+                        {
+                            http_version[i] = message[it];
+                            it++;
+                        }
+                    }
+
+                    lowercase_header(message);
 
                     // GET Request
                     if (strcmp(http_method, "GET") == 0)
@@ -626,12 +649,13 @@ int main(int argc, char **argv)
                         printf("DEBUG: Unsupported request\n");
                         handle_other(fds[i].fd, clients[i], http_method, requested_url);
                         close_conn = true;
+                        break;
                     }
                 }
 
                 if (close_conn)
                 {
-                    printf("Connection closed.\n");
+                    // printf("Connection closed.\n");
                     close_connection(&fds[i].fd, &compress_array);
                 }
             }
@@ -639,7 +663,7 @@ int main(int argc, char **argv)
 
         if (compress_array)
         {
-            printf("Number of fds: %d. Compressing array...\n", nfds);
+            //printf("Number of fds: %d. Compressing array...\n", nfds);
             compress_array = false;
             for (int i = 0; i < nfds; i++)
             {
@@ -653,7 +677,7 @@ int main(int argc, char **argv)
                     nfds--;
                 }
             }
-            printf("Number of fds: %d\n", nfds);
+            //printf("Number of fds: %d\n", nfds);
         }
 
         /*
@@ -755,8 +779,7 @@ int main(int argc, char **argv)
     {
         if (fds[i].fd >= 0)
         {
-            shutdown(fds[i].fd, SHUT_RDWR);
-            close(fds[i].fd);
+            close_connection(&fds[i].fd, NULL);
         }
     }
 }
