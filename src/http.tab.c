@@ -62,7 +62,7 @@
 
 
 /* Copy the first part of user declarations.  */
-#line 1 "html.y" /* yacc.c:339  */
+#line 1 "http.y" /* yacc.c:339  */
 
 
 #include <stdio.h>
@@ -74,7 +74,7 @@ int yyerror(char *s);
 extern bool VALID;
 
 
-#line 78 "html.tab.c" /* yacc.c:339  */
+#line 78 "http.tab.c" /* yacc.c:339  */
 
 # ifndef YY_NULLPTR
 #  if defined __cplusplus && 201103L <= __cplusplus
@@ -93,9 +93,9 @@ extern bool VALID;
 #endif
 
 /* In a future release of Bison, this section will be replaced
-   by #include "html.tab.h".  */
-#ifndef YY_YY_HTML_TAB_H_INCLUDED
-# define YY_YY_HTML_TAB_H_INCLUDED
+   by #include "http.tab.h".  */
+#ifndef YY_YY_HTTP_TAB_H_INCLUDED
+# define YY_YY_HTTP_TAB_H_INCLUDED
 /* Debug traces.  */
 #ifndef YYDEBUG
 # define YYDEBUG 0
@@ -133,11 +133,11 @@ extern YYSTYPE yylval;
 
 int yyparse (void);
 
-#endif /* !YY_YY_HTML_TAB_H_INCLUDED  */
+#endif /* !YY_YY_HTTP_TAB_H_INCLUDED  */
 
 /* Copy the second part of user declarations.  */
 
-#line 141 "html.tab.c" /* yacc.c:358  */
+#line 141 "http.tab.c" /* yacc.c:358  */
 
 #ifdef short
 # undef short
@@ -1206,15 +1206,15 @@ yyreduce:
   switch (yyn)
     {
         case 2:
-#line 31 "html.y" /* yacc.c:1646  */
+#line 31 "http.y" /* yacc.c:1646  */
     {
         VALID = true;
     }
-#line 1214 "html.tab.c" /* yacc.c:1646  */
+#line 1214 "http.tab.c" /* yacc.c:1646  */
     break;
 
 
-#line 1218 "html.tab.c" /* yacc.c:1646  */
+#line 1218 "http.tab.c" /* yacc.c:1646  */
       default: break;
     }
   /* User semantic actions sometimes alter yychar, and that requires
@@ -1442,11 +1442,16 @@ yyreturn:
 #endif
   return yyresult;
 }
-#line 47 "html.y" /* yacc.c:1906  */
+#line 47 "http.y" /* yacc.c:1906  */
 
 
 int yyerror(char *s)
 {
+    if (s == NULL)
+    {
+        VALID = false;
+    }
+    
     VALID = false;
     return 0;
 }

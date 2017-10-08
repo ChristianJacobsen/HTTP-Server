@@ -3,15 +3,18 @@ CPPFLAGS =
 CFLAGS = -std=c11 -D_XOPEN_SOURCE=700 -O2 -Wall -Wextra -Wformat=2 `pkg-config --cflags glib-2.0`
 LDFLAGS =
 LOADLIBES =
-OBJFILES = header_parser/html.tab.o header_parser/lex.yy.o
+OBJFILES = http.tab.o lex.yy.o
 LDLIBS = `pkg-config --libs glib-2.0`
 
 .DEFAULT: all
 .PHONY: all
-all: httpd
+all: parse httpd
 
 httpd: httpd.c $(OBJFILES)
 	$(CC) $(CFLAGS) -o httpd httpd.c $(OBJFILES) $(LDLIBS)
+
+parse: http.tab.c http.tab.h lex.yy.c
+	$(CC) $(CFLAGS) -c http.tab.c lex.yy.c
 
 clean:
 	rm -f *.o

@@ -48,6 +48,11 @@ sheaderfield:
 
 int yyerror(char *s)
 {
+    if (s == NULL)
+    {
+        VALID = false;
+    }
+    
     VALID = false;
     return 0;
 }
