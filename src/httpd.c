@@ -64,6 +64,9 @@ const int ipv4_url_max_size = 19;
 const int max_connections = 200;
 const char* HTTP_V1 = "HTTP/1.1";
 const char* HTTP_V0 = "HTTP/1.0";
+const char *html_start = "<!DOCTYPE html>\n<html lang=\"en\">\n\t<head>\n\t\t<title>HTTP Server response</title>\n\t\t<meta charset=\"UTF-8\">\n\t\t<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\t</head>\n\t<body>\n\t\t";
+const char *html_end = "\n\t</body>\n</html>\n";
+FILE *log_file = NULL;
 
 // Source: https://stackoverflow.com/questions/31426420/configuring-tcp-keepalive-after-accept
 // void enable_keepalive(int sock)
@@ -174,20 +177,6 @@ bool is_keep_alive(GString* header, GString* http_version)
     return keep_alive;
 }
 
-void lowercase_header(char* message)
-{
-    int i = 0;
-    while(i+3 < tcp_max_size)
-    {
-        if (message[i] == '\r' && message[i+1] == '\n' && message[i+2] == '\r' && message[i+3] == '\n')
-        {
-            break;
-        }
-
-        message[i] = tolower(message[i]);
-    }
-}
-
 void parse_message(char* message, GString** header, GString** body, GString** http_method, GString** requested_url, GString** http_version)
 {   
     // Split message into header and body by two CLRF's in a row
@@ -238,66 +227,26 @@ void get_port(struct sockaddr_in addr, int *port)
     *port = *port | ((addr.sin_port >> 8) & 0xFF);
 }
 
-char *get_message_body(char *message, ssize_t n)
+void add_body(GString** header, GString* body)
 {
-    // Find 2 consecutive new-lines
-    message[n] = '\0';
-    int i;
-    for (i = 0; i < n; i++)
-    {
-        if (message[i] == '\n' && message[i + 1] == '\n')
-        {
-            i += 2;
-            break;
-        }
-    }
-
-    char *body = message + i;
-
-    return body;
+    g_string_append_printf(*header, "\r\n%s", body->str);
 }
 
-void add_body(char **header, char *body)
+void add_header_field(GString** header, char* field_name, char* field_value)
 {
-    *header = realloc(*header, 5 + strlen(*header) + strlen(body));
-
-    strcat(*header, "\r\n");
-    strcat(*header, body);
+    g_string_append_printf(*header, "\r\n%s: %s ", field_name, field_value);
 }
 
-void add_header_field(char **header, char *field_name, char *field_value)
+GString* create_header(const char* http_version, const int http_code, const char* http_phrase)
 {
-    *header = realloc(*header, 5 + strlen(*header) + strlen(field_name) + strlen(field_value));
-
-    strcat(*header, "\r\n");
-    strcat(*header, field_name);
-    strcat(*header, ": ");
-    strcat(*header, field_value);
-}
-
-char *create_header(char *http_version, char *http_code, char *http_phrase)
-{
-    char *header = calloc(5 + strlen(http_version) + strlen(http_code) + strlen(http_phrase), 1);
-
-    strcpy(header, http_version);
-    strcat(header, " ");
-    strcat(header, http_code);
-    strcat(header, " ");
-    strcat(header, http_phrase);
+    GString* header = g_string_new("");
+    g_string_printf(header, "%s %d %s", http_version, http_code, http_phrase);
 
     return header;
 }
 
-char *create_html(struct sockaddr_in server, struct sockaddr_in client, char *requested_url, char *message_body)
+GString* create_html(struct sockaddr_in server, struct sockaddr_in client, GString* requested_url, GString* body)
 {
-    char *html_start = "<!DOCTYPE html>\n<html lang=\"en\">\n\t<head>\n\t\t<title>HTTP Server response</title>\n\t\t<meta charset=\"UTF-8\">\n\t\t<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\t</head>\n\t<body>\n\t\t";
-    char *html_end = "\n\t</body>\n</html>\n";
-    char server_URL[ipv4_url_max_size];
-    char client_URL[ipv4_url_max_size];
-
-    int message_body_size = (message_body == NULL ? 0 : strlen(message_body) + 1);
-    char *body_content = calloc(43 + strlen(requested_url) + message_body_size, 1);
-
     // Get the port of server
     int server_port;
     get_port(server, &server_port);
@@ -307,59 +256,63 @@ char *create_html(struct sockaddr_in server, struct sockaddr_in client, char *re
     get_ip(client, &client_ip1, &client_ip2, &client_ip3, &client_ip4);
     get_port(client, &client_port);
 
-    snprintf(server_URL, ipv4_url_max_size, "localhost:%d", server_port);
-    snprintf(client_URL, ipv4_url_max_size, "%d.%d.%d.%d:%d", client_ip1, client_ip2, client_ip3, client_ip4, client_port);
+    GString* html = g_string_new("");
+    GString* server_URL = g_string_new("");
+    GString* client_URL = g_string_new("");
 
-    strcpy(body_content, "http://");
-    strcat(body_content, server_URL);
-    strcat(body_content, requested_url);
-    strcat(body_content, " ");
-    strcat(body_content, client_URL);
+    g_string_printf(server_URL, "localhost:%d", server_port);
+    g_string_printf(client_URL, "%d.%d.%d.%d:%d", client_ip1, client_ip2, client_ip3, client_ip4, client_port);
 
-    if (message_body != NULL)
+    g_string_printf(html, "%shttp://%s%s %s", html_start, server_URL->str, requested_url->str, client_URL->str);
+
+    if (body != NULL)
     {
-        strcat(body_content, "\r\n");
-        strcat(body_content, message_body);
+        g_string_append_printf(html, "\n%s", body->str);
     }
 
-    char *html_complete = calloc(strlen(html_start) + strlen(body_content) + strlen(html_end) + 1, 1);
+    g_string_append_printf(html, "%s", html_end);
 
-    strcpy(html_complete, html_start);
-    strcat(html_complete, body_content);
-    strcat(html_complete, html_end);
+    g_string_free(server_URL, TRUE);
+    g_string_free(client_URL, TRUE);
 
-    return html_complete;
+    return html;
 }
 
-char *create_response(bool is_head, struct sockaddr_in server, struct sockaddr_in client, char *requested_url, char *message_body, bool keep_alive)
+GString* create_response(bool is_head, struct sockaddr_in server, struct sockaddr_in client, GString* requested_url, GString* body, bool keep_alive)
 {
-    char html_size[1024];
+    GString* html = create_html(server, client, requested_url, body);
 
-    char *html = create_html(server, client, requested_url, message_body);
+    GString* html_size = g_string_new("");
+    g_string_printf(html_size, "%lu", html->len);
 
-    snprintf(html_size, strlen(html), "%d", (int)strlen(html));
+    GString* header = create_header(HTTP_V1, 200, "OK");
 
-    char *header = create_header("HTTP/1.1", "200", "OK");
-
-    add_header_field(&header, "Content-Length", html_size);
+    add_header_field(&header, "Content-Length", html_size->str);
     add_header_field(&header, "Content-Type", "text/html");
-    strcat(header, "\r\n");
+
+    if (!keep_alive)
+    {
+        add_header_field(&header, "Connection", "close");
+    }
+
+    header = g_string_append(header, "\r\n");
 
     if (!is_head)
     {
         add_body(&header, html);
     }
+    else
+    {
+        g_string_append_printf(header, "\r\n");
+    }
+
+    g_string_free(html_size, TRUE);
 
     return header;
 }
 
-void log_request(struct sockaddr_in client, char *http_method, char *requested_url, int status_code)
+void log_request(struct sockaddr_in client, GString* http_method, GString* requested_url, int status_code)
 {
-    int logMessageSize = 64 + strlen(http_method) + strlen(requested_url);
-    int count;
-    bool success = false;
-    char *logMessage = calloc(logMessageSize, 1);
-
     // Get the IPv4 address and port
     int ip1, ip2, ip3, ip4, port;
     get_ip(client, &ip1, &ip2, &ip3, &ip4);
@@ -370,90 +323,65 @@ void log_request(struct sockaddr_in client, char *http_method, char *requested_u
     time_t t = time(NULL);
     struct tm tm = *localtime(&t);
 
-    count = snprintf(logMessage, logMessageSize, "%d-%02d-%02dT%02d:%02d:%02dZ : ", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec);
+    GString* log_message = g_string_new("");
+    g_string_printf(log_message, "%d-%02d-%02dT%02d:%02d:%02dZ : <%d.%d.%d.%d>:<%d> <%s> <%s> : <%d>", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec, ip1, ip2, ip3, ip4, port, http_method->str, requested_url->str, status_code);
 
-    if (0 <= count && count <= logMessageSize)
+    g_printf("%s\n", log_message->str);
+
+    if (log_file != NULL)
     {
-        // Construct the IP and port
-        count += snprintf(logMessage + count, logMessageSize - count, "<%d.%d.%d.%d>:<%d> ", ip1, ip2, ip3, ip4, port);
-
-        if (0 <= count && count <= logMessageSize)
-        {
-            // Construct the HTTP method, request URL and response code
-            count = snprintf(logMessage + count, logMessageSize - count, "<%s> <%s> : <%d>", http_method, requested_url, status_code);
-            success = true;
-        }
-    }
-
-    if (success)
-    {
-        printf("%s\n", logMessage);
-
-        FILE *fp = NULL;
-        fp = fopen("httpd_logfile", "a");
-
-        if (fp != NULL)
-        {
-            fprintf(fp, "%s\n", logMessage);
-            fclose(fp);
-        }
-        else
-        {
-            printf("ERROR: Could not open log file\nErrno: %d\n", errno);
-        }
+        fprintf(log_file, "%s\n", log_message->str);
     }
     else
     {
-        printf("ERROR: Could not construct log message\n");
+        printf("ERROR: Could not open log file\nErrno: %d\n", errno);
     }
 
-    free(logMessage);
+    g_string_free(log_message, TRUE);
 }
 
-void handle_GET(int connfd, struct sockaddr_in server, struct sockaddr_in client, char *http_method, char *requested_url, bool keep_alive)
+void handle_GET(int connfd, struct sockaddr_in server, struct sockaddr_in client, GString* http_method, GString* requested_url, bool keep_alive)
 {
-    char *header = create_response(false, server, client, requested_url, NULL, keep_alive);
+    GString* response = create_response(false, server, client, requested_url, NULL, keep_alive);
 
     log_request(client, http_method, requested_url, 200);
 
-    send(connfd, header, strlen(header), 0);
+    send(connfd, response->str, response->len, 0);
 
-    free(header);
+    g_string_free(response, TRUE);
 }
 
-void handle_HEAD(int connfd, struct sockaddr_in server, struct sockaddr_in client, char *http_method, char *requested_url, bool keep_alive)
+void handle_HEAD(int connfd, struct sockaddr_in server, struct sockaddr_in client, GString* http_method, GString* requested_url, bool keep_alive)
 {
-    char *header = create_response(true, server, client, requested_url, NULL, keep_alive);
+    GString* response = create_response(true, server, client, requested_url, NULL, keep_alive);
 
     log_request(client, http_method, requested_url, 200);
 
-    send(connfd, header, strlen(header), 0);
+    send(connfd, response->str, response->len, 0);
 
-    free(header);
+    g_string_free(response, TRUE);
 }
 
-void handle_POST(int connfd, struct sockaddr_in server, struct sockaddr_in client, char *http_method, char *requested_url, char *message, ssize_t n, bool keep_alive)
+void handle_POST(int connfd, struct sockaddr_in server, struct sockaddr_in client, GString* http_method, GString* requested_url, GString* body, bool keep_alive)
 {
-    char *message_body = get_message_body(message, n);
-
-    char *header = create_response(false, server, client, requested_url, message_body, keep_alive);
+    GString* response = create_response(false, server, client, requested_url, body, keep_alive);
 
     log_request(client, http_method, requested_url, 200);
 
-    send(connfd, header, strlen(header), 0);
+    send(connfd, response->str, response->len, 0);
 
-    free(header);
+    g_string_free(response, TRUE);
 }
 
-void handle_other(int connfd, struct sockaddr_in client, char *http_method, char *requested_url)
+void handle_other(int connfd, struct sockaddr_in client, GString* http_method, GString* requested_url)
 {
-    char *header = create_header("HTTP/1.1", "501", "Unsupported");
+    GString* response = create_header("HTTP/1.1", 501, "Unsupported");
 
     log_request(client, http_method, requested_url, 501);
 
-    send(connfd, header, strlen(header), 0);
+    send(connfd, response->str, response->len, 0);
 
-    free(header);
+    g_string_free(response, TRUE);
 }
 
 int main(int argc, char **argv)
@@ -461,7 +389,14 @@ int main(int argc, char **argv)
     // Verify arguments
     if (argc != 2)
     {
-        printf("Incorrect number of arguments.\nSpecify port number.\nExiting...\n");
+        g_printf("Incorrect number of arguments.\nSpecify port number.\nExiting...\n");
+        return -1;
+    }
+
+    log_file = fopen("httpd_logfile", "a");
+    if (log_file == NULL)
+    {
+        g_printf("Could not open log file.\nExiting...\n");
         return -1;
     }
 
@@ -629,9 +564,9 @@ int main(int argc, char **argv)
                 if (nfds == max_connections - 1)
                 {
                     g_printf("Maximum connections reached, rejecting...\n");
-                    shutdown(connfd, SHUT_RDWR);
+                    close_connection(&connfd, NULL);
 
-                    break;
+                    continue;
                 }
 
                 // struct timeval timeout;
@@ -645,96 +580,69 @@ int main(int argc, char **argv)
             }
             else
             {
-                while (true)
+                close_conn = false;
+                keep_alive = false;
+                memset(&message, 0, sizeof(message));
+
+                ssize_t n = recv(fds[i].fd, message, sizeof(message) - 1, 0);
+
+                // int max = 1000;
+                // printf("\n=== DEBUG MESSAGE ===\n");
+                
+                // printf("%s", message);
+
+                // printf("\n============\n\n");
+
+                // printf("DEBUG: Received:\n%s\n", message);
+
+                if (n <= 0)
                 {
-                    close_conn = false;
-                    keep_alive = false;
-                    memset(&message, 0, sizeof(message));
-
-                    // struct timeval timeout2;
-                    // timeout2.tv_sec = 5;
-                    // timeout2.tv_usec = 0;
-                    // int s = setsockopt(fds[i].fd, SOL_SOCKET, SO_RCVTIMEO, &timeout2, sizeof(timeout2));
-                    // printf("Set Success: %d. tv_sec: %ld. tv_usec: %d.\n", s, timeout2.tv_sec, timeout2.tv_usec);
-
-                    // struct timeval timeout3;
-                    // socklen_t timeout_size;
-
-                    // memset(&timeout3, 0, sizeof(timeout3));
-                    // memset(&timeout_size, 0, sizeof(timeout_size));
-
-                    // s = getsockopt(fds[i].fd, SOL_SOCKET, SO_RCVTIMEO, &timeout3, &timeout_size);
-                    // printf("Get Success: %d. tv_sec: %ld. tv_usec: %d. size: %d\n", s, timeout3.tv_sec, timeout3.tv_usec, timeout_size);
-
-                    ssize_t n = recv(fds[i].fd, message, sizeof(message) - 1, 0);
-
-                    // int max = 1000;
-                    // printf("\n=== DEBUG MESSAGE ===\n");
-                    
-                    // printf("%s", message);
-
-                    // printf("\n============\n\n");
-
-                    // printf("DEBUG: Received:\n%s\n", message);
-
-                    if (n <= 0)
+                    if (n == 0)
                     {
-                        if (n == 0)
-                        {
-                            g_printf("Client closed connection.\n");
-                        }
-                        else if (errno == EAGAIN || errno == EWOULDBLOCK)
-                        {
-                            // Timeout -> close connection
-                            g_printf("Client timed out, closing connection...\n");
-                        }
-                        else
-                        {
-                            g_printf("recv failed. Unknown error. errno: %d\nClosing connection...\n", errno);
-                        }
-
-                        close_conn = true;
-                        break;
+                        g_printf("Client closed connection.\n");
                     }
-                    
+                    else if (errno == EAGAIN || errno == EWOULDBLOCK)
+                    {
+                        // Timeout -> close connection
+                        g_printf("Client timed out, closing connection...\n");
+                    }
+                    else
+                    {
+                        g_printf("recv failed. Unknown error. errno: %d\nClosing connection...\n", errno);
+                    }
+
+                    close_conn = true;
+                }
+                else
+                {
                     // TODO: VALIDATE MESSAGE
 
                     parse_message(message, &header, &body,&http_method, &requested_url, &http_version);
                     keep_alive = is_keep_alive(header, http_version);
-                    
-                    g_printf("\nHeader (%lu):\n%s\n", header->len, header->str);
-                    g_printf("\nBody (%lu):\n%s\n", body->len, body->str);
-                    g_printf("\nMethod (%lu):\n%s\n", http_method->len, http_method->str);
-                    g_printf("\nURL (%lu):\n%s\n", requested_url->len, requested_url->str);
-                    g_printf("\nVersion (%lu):\n%s\n", http_version->len, http_version->str);
+                    close_conn = !keep_alive;
 
-                    return 0;
-
-                    // lowercase_header(message);
-
-                    // // GET Request
-                    // if (strcmp(http_method, "GET") == 0)
-                    // {
-                    //     handle_GET(fds[i].fd, server, clients[i], http_method, requested_url);
-                    // }
-                    // // HEAD Request
-                    // else if (strcmp(http_method, "HEAD") == 0)
-                    // {
-                    //     handle_HEAD(fds[i].fd, server, clients[i], http_method, requested_url);
-                    // }
-                    // // POST Request
-                    // else if (strcmp(http_method, "POST") == 0)
-                    // {
-                    //     handle_POST(fds[i].fd, server, clients[i], http_method, requested_url, message, n);
-                    // }
-                    // // Not supported request
-                    // else
-                    // {
-                    //     printf("DEBUG: Unsupported request\n");
-                    //     handle_other(fds[i].fd, clients[i], http_method, requested_url);
-                    //     close_conn = true;
-                    //     break;
-                    // }
+                    // GET Request
+                    if (g_strcmp0(http_method->str, "GET") == 0)
+                    {
+                        handle_GET(fds[i].fd, server, clients[i], http_method, requested_url, keep_alive);
+                    }
+                    // HEAD Request
+                    else if (g_strcmp0(http_method->str, "HEAD") == 0)
+                    {
+                        handle_HEAD(fds[i].fd, server, clients[i], http_method, requested_url, keep_alive);
+                    }
+                    // POST Request
+                    else if (g_strcmp0(http_method->str, "POST") == 0)
+                    {
+                        handle_POST(fds[i].fd, server, clients[i], http_method, requested_url, body, keep_alive);
+                    }
+                    // Not supported request
+                    else
+                    {
+                        printf("DEBUG: Unsupported request\n");
+                        handle_other(fds[i].fd, clients[i], http_method, requested_url);
+                        close_conn = true;
+                    }
 
                     g_string_free(header, TRUE);
                     g_string_free(body, TRUE);
@@ -872,4 +780,8 @@ int main(int argc, char **argv)
             close_connection(&fds[i].fd, NULL);
         }
     }
+
+    fclose(log_file);
+
+    return 0;
 }
