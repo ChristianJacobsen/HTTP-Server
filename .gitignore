@@ -130,3 +130,5 @@ $RECYCLE.BIN/
 
 # Custom
 src/httpd
+!src/header_parser/html.tab.o
+!src/header_parser/lex.yy.o

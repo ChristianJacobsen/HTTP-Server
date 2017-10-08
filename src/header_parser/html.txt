@@ -1,4 +1,0 @@
-POST /api/birkir HTTP/1.1
-Connection: keep-alive
-HOST: localhost:32000
-
