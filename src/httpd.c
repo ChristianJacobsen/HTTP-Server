@@ -1,4 +1,4 @@
-/* A TCP echo server.
+/* A TCP HTTP Server.
  * Poll code based on https://www.ibm.com/support/knowledgecenter/ssw_ibm_i_71/rzab6/poll.htm
  * Use of Flex and Bison for the HTTP Parser are subject to the GPL-3.0 License.
  */
