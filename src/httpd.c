@@ -331,7 +331,7 @@ GString* create_header(const char* http_version, const int http_code, const char
 /*
  * Create the HTML "file" with an optional custom body
  */
-GString* create_html(struct sockaddr_in server, struct sockaddr_in client, GString* requested_url, GString* body)
+GString* create_html(struct sockaddr_in server, struct sockaddr_in client, GString* requested_url, GString* host, GString* body)
 {
     // Get the port of server
     int server_port;
@@ -347,7 +347,15 @@ GString* create_html(struct sockaddr_in server, struct sockaddr_in client, GStri
     GString* client_URL = g_string_new("");
 
     // Construct the server URL
-    g_string_printf(server_URL, "localhost:%d", server_port);
+    if (host != NULL)
+    {
+        g_string_printf(server_URL, "%s", host->str);
+    }
+    // If Host header is not provided, default to localhost
+    else
+    {
+        g_string_printf(server_URL, "localhost:%d", server_port);
+    }
 
     // Construct the client URL
     g_string_printf(client_URL, "%d.%d.%d.%d:%d", client_ip1, client_ip2, client_ip3, client_ip4, client_port);
@@ -376,10 +384,10 @@ GString* create_html(struct sockaddr_in server, struct sockaddr_in client, GStri
  * Content-Length, Content-Type and Connection:close if this is not keep-alive.
  * Adds the HTML file to the message body of the response if not a HEAD request
  */
-GString* create_response(bool is_head, struct sockaddr_in server, struct sockaddr_in client, GString* requested_url, GString* body, bool keep_alive)
+GString* create_response(bool is_head, struct sockaddr_in server, struct sockaddr_in client, GString* requested_url, GString* host, GString* body, bool keep_alive)
 {
     // Create HTML
-    GString* html = create_html(server, client, requested_url, body);
+    GString* html = create_html(server, client, requested_url, host, body);
 
     // Get the HTML size as "char bytes"
     GString* html_size = g_string_new("");
@@ -465,10 +473,10 @@ void log_request(struct sockaddr_in client, GString* http_method, GString* reque
  * Handles a GET request
  * Creates, sends the response and logs the request
  */
-void handle_GET(int connfd, struct sockaddr_in server, struct sockaddr_in client, GString* http_method, GString* requested_url, bool keep_alive)
+void handle_GET(int connfd, struct sockaddr_in server, struct sockaddr_in client, GString* http_method, GString* requested_url, GString* host, bool keep_alive)
 {
     // Create response
-    GString* response = create_response(false, server, client, requested_url, NULL, keep_alive);
+    GString* response = create_response(false, server, client, requested_url, host, NULL, keep_alive);
 
     // Send response
     send(connfd, response->str, response->len, 0);
@@ -483,10 +491,10 @@ void handle_GET(int connfd, struct sockaddr_in server, struct sockaddr_in client
  * Handles a HEAD request
  * Creates, sends the response and logs the request
  */
-void handle_HEAD(int connfd, struct sockaddr_in server, struct sockaddr_in client, GString* http_method, GString* requested_url, bool keep_alive)
+void handle_HEAD(int connfd, struct sockaddr_in server, struct sockaddr_in client, GString* http_method, GString* requested_url, GString* host, bool keep_alive)
 {
     // Create response
-    GString* response = create_response(true, server, client, requested_url, NULL, keep_alive);
+    GString* response = create_response(true, server, client, requested_url, host, NULL, keep_alive);
 
     // Send response
     send(connfd, response->str, response->len, 0);
@@ -501,10 +509,10 @@ void handle_HEAD(int connfd, struct sockaddr_in server, struct sockaddr_in clien
  * Handles a GET request.
  * Creates, sends the response and logs the request
  */
-void handle_POST(int connfd, struct sockaddr_in server, struct sockaddr_in client, GString* http_method, GString* requested_url, GString* body, bool keep_alive)
+void handle_POST(int connfd, struct sockaddr_in server, struct sockaddr_in client, GString* http_method, GString* requested_url, GString* host, GString* body, bool keep_alive)
 {
     // Create response
-    GString* response = create_response(false, server, client, requested_url, body, keep_alive);
+    GString* response = create_response(false, server, client, requested_url, host, body, keep_alive);
 
     // Send response
     send(connfd, response->str, response->len, 0);
@@ -564,11 +572,12 @@ void serve_client(int* client_fd, bool* compress_arr, struct sockaddr_in server,
     bool close_conn = false;
     bool keep_alive = false;
 
-    GString* http_method;
-    GString* requested_url;
-    GString* http_version;
-    GString* header;
-    GString* body;
+    GString* http_method = NULL;
+    GString* requested_url = NULL;
+    GString* http_version = NULL;
+    GString* header = NULL;
+    GString* host = NULL;
+    GString* body = NULL;
 
     char message[message_buffer_size];
     memset(&message, 0, sizeof(message));
@@ -606,20 +615,23 @@ void serve_client(int* client_fd, bool* compress_arr, struct sockaddr_in server,
             }
             else
             {
+                // Get the Host header field
+                host = get_header_field_value(header, "Host");
+
                 // GET Request
                 if (g_strcmp0(http_method->str, "GET") == 0)
                 {
-                    handle_GET(*client_fd, server, client, http_method, requested_url, keep_alive);
+                    handle_GET(*client_fd, server, client, http_method, requested_url, host, keep_alive);
                 }
                 // HEAD Request
                 else if (g_strcmp0(http_method->str, "HEAD") == 0)
                 {
-                    handle_HEAD(*client_fd, server, client, http_method, requested_url, keep_alive);
+                    handle_HEAD(*client_fd, server, client, http_method, requested_url, host, keep_alive);
                 }
                 // POST Request
                 else if (g_strcmp0(http_method->str, "POST") == 0)
                 {
-                    handle_POST(*client_fd, server, client, http_method, requested_url, body, keep_alive);
+                    handle_POST(*client_fd, server, client, http_method, requested_url, host, body, keep_alive);
                 }
                 // Not supported request
                 else
@@ -634,6 +646,11 @@ void serve_client(int* client_fd, bool* compress_arr, struct sockaddr_in server,
             g_string_free(http_method, TRUE);
             g_string_free(requested_url, TRUE);
             g_string_free(http_version, TRUE);
+            
+            if (host != NULL)
+            {
+                g_string_free(host, TRUE);
+            }
         }
     }
 
