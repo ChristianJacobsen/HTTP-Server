@@ -399,6 +399,10 @@ GString* create_response(bool is_head, struct sockaddr_in server, struct sockadd
     {
         add_header_field(&header, "Connection", "close");
     }
+    else
+    {
+        add_header_field(&header, "Connection", "keep-alive");
+    }
 
     // Append a CLRF to the header
     header = g_string_append(header, "\r\n");
