@@ -13,9 +13,14 @@ extern bool VALID;
 %token SP
 %token CRLF
 
-%token method
-%token requesttarget
-%token HTTPversion
+// %token method
+// %token requesttarget
+// %token HTTPversion
+
+// requestline:
+
+//     method SP requesttarget SP HTTPversion CRLF
+%token requestline
 
 %token fieldname
 %token fieldvalue
@@ -33,10 +38,6 @@ HTTPmessage:
     }
 
     | ;
-
-requestline:
-
-    method SP requesttarget SP HTTPversion CRLF
 
 sheaderfield:
 
