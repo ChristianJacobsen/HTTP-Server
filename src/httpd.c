@@ -598,27 +598,35 @@ void serve_client(int* client_fd, bool* compress_arr, struct sockaddr_in server,
             // Determine if the request is keep-alive
             keep_alive = is_keep_alive(header, http_version);
             close_conn = !keep_alive;
-    
-            // GET Request
-            if (g_strcmp0(http_method->str, "GET") == 0)
-            {
-                handle_GET(*client_fd, server, client, http_method, requested_url, keep_alive);
-            }
-            // HEAD Request
-            else if (g_strcmp0(http_method->str, "HEAD") == 0)
-            {
-                handle_HEAD(*client_fd, server, client, http_method, requested_url, keep_alive);
-            }
-            // POST Request
-            else if (g_strcmp0(http_method->str, "POST") == 0)
-            {
-                handle_POST(*client_fd, server, client, http_method, requested_url, body, keep_alive);
-            }
-            // Not supported request
-            else
+
+            if (g_strcmp0(http_version->str, HTTP_V1) != 0 && g_strcmp0(http_version->str, HTTP_V0) != 0)
             {
                 handle_other(*client_fd, client, http_method, requested_url);
                 close_conn = true;
+            }
+            else
+            {
+                // GET Request
+                if (g_strcmp0(http_method->str, "GET") == 0)
+                {
+                    handle_GET(*client_fd, server, client, http_method, requested_url, keep_alive);
+                }
+                // HEAD Request
+                else if (g_strcmp0(http_method->str, "HEAD") == 0)
+                {
+                    handle_HEAD(*client_fd, server, client, http_method, requested_url, keep_alive);
+                }
+                // POST Request
+                else if (g_strcmp0(http_method->str, "POST") == 0)
+                {
+                    handle_POST(*client_fd, server, client, http_method, requested_url, body, keep_alive);
+                }
+                // Not supported request
+                else
+                {
+                    handle_other(*client_fd, client, http_method, requested_url);
+                    close_conn = true;
+                }
             }
 
             g_string_free(header, TRUE);

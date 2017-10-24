@@ -92,10 +92,7 @@ extern bool VALID;
 # define YYERROR_VERBOSE 0
 #endif
 
-/* In a future release of Bison, this section will be replaced
-   by #include "http.tab.h".  */
-#ifndef YY_YY_HTTP_TAB_H_INCLUDED
-# define YY_YY_HTTP_TAB_H_INCLUDED
+
 /* Debug traces.  */
 #ifndef YYDEBUG
 # define YYDEBUG 0
@@ -133,11 +130,11 @@ extern YYSTYPE yylval;
 
 int yyparse (void);
 
-#endif /* !YY_YY_HTTP_TAB_H_INCLUDED  */
+
 
 /* Copy the second part of user declarations.  */
 
-#line 141 "http.tab.c" /* yacc.c:358  */
+#line 138 "http.tab.c" /* yacc.c:358  */
 
 #ifdef short
 # undef short
@@ -1210,11 +1207,11 @@ yyreduce:
     {
         VALID = true;
     }
-#line 1214 "http.tab.c" /* yacc.c:1646  */
+#line 1211 "http.tab.c" /* yacc.c:1646  */
     break;
 
 
-#line 1218 "http.tab.c" /* yacc.c:1646  */
+#line 1215 "http.tab.c" /* yacc.c:1646  */
       default: break;
     }
   /* User semantic actions sometimes alter yychar, and that requires
