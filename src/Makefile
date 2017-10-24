@@ -8,7 +8,7 @@ LDLIBS = `pkg-config --libs glib-2.0`
 
 .DEFAULT: all
 .PHONY: all
-all: parse httpd
+all: parse httpd clean
 
 httpd: httpd.c $(OBJFILES)
 	$(CC) $(CFLAGS) -o httpd httpd.c $(OBJFILES) $(LDLIBS)
