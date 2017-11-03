@@ -36,6 +36,7 @@ struct client {
 struct http_request {
     GHashTable* header_fields;
     GHashTable* query_parameters;
+    GHashTable* cookies;
     char* host;
     page_type page;
     GString* http_method;
@@ -207,6 +208,70 @@ bool is_keep_alive(struct http_request request)
     }
 
     return keep_alive;
+}
+
+void create_cookies_hashmap(struct http_request* request)
+{
+    request->cookies = g_hash_table_new_full(g_str_hash, g_str_equal, (GDestroyNotify) free_destroyed, (GDestroyNotify) free_destroyed);
+
+    if (!g_hash_table_contains(request->header_fields, "cookie"))
+    {
+        return;
+    }
+
+    char* cookies = g_hash_table_lookup(request->header_fields, "cookie");
+
+    // Split the cookie field to get individual cookies
+    gchar** individual_cookies = g_strsplit(cookies, ";", -1);
+
+    g_printf("Number of query cookies: %d\n", g_strv_length(individual_cookies));
+
+    guint len = g_strv_length(individual_cookies);
+
+    gchar** cookie_split = NULL;
+
+    // Start at the first query parameter
+    for(guint i = 0; i < len; i++)
+    {   
+        // Split the query parameter into key and value
+        cookie_split = g_strsplit(individual_cookies[i], "=", 2);
+
+        if (cookie_split == NULL)
+        {
+            g_printf("Split null, ignoring\n");
+            continue;
+        }
+
+        if (g_strv_length(cookie_split) == 2)
+        {
+            char* key = g_strdup(cookie_split[0]);
+            char* value = g_strdup(cookie_split[1]);
+
+            g_printf("Adding cookie '%s' with value '%s'\n", key, value);
+            g_hash_table_insert(request->cookies, key, value);
+        }
+        else
+        {
+            char* key = g_strdup(cookie_split[0]);
+
+            g_printf("Adding cookie '%s' with empty string\n", key);
+            g_hash_table_insert(request->cookies, key, "");
+        }
+        
+        g_strfreev(cookie_split);
+
+        cookie_split = NULL;
+    }
+
+    if (cookie_split != NULL)
+    {
+        g_strfreev(cookie_split);
+    }
+
+    if (individual_cookies != NULL)
+    {
+        g_strfreev(individual_cookies);
+    }
 }
 
 void create_query_parameters_hashmap(struct http_request* request)
@@ -479,6 +544,11 @@ GString* create_html(bool is_post, struct sockaddr_in server, struct client clie
     {
         char* color = (char*) g_hash_table_lookup(request.query_parameters, "bg");
 
+        if (color == NULL)
+        {
+            color = (char*) g_hash_table_lookup(request.cookies, "bg");
+        }
+
         // Construct the initial body
         g_string_printf(html, "%s%s%s", html_color_start, color, html_color_end);
     }
@@ -572,6 +642,16 @@ GString* create_response(bool is_head, bool is_post, struct sockaddr_in server, 
     else
     {
         add_header_field(&header, "Connection", "keep-alive");
+    }
+
+    if (request.page == COLOR && g_hash_table_contains(request.query_parameters, "bg"))
+    {
+        GString* cookie = g_string_new("bg=");
+        g_string_append_printf(cookie, "%s", (char *) g_hash_table_lookup(request.query_parameters, "bg"));
+
+        add_header_field(&header, "Set-Cookie", cookie->str);
+
+        g_string_free(cookie, TRUE);
     }
 
     // Append a CLRF to the header
@@ -735,6 +815,7 @@ void serve_client(int* client_fd, bool* compress_arr, struct sockaddr_in server,
     struct http_request request;
     request.header_fields = NULL;
     request.query_parameters = NULL;
+    request.cookies = NULL;
     request.http_method = NULL;
     request.requested_url = NULL;
     request.http_version = NULL;
@@ -769,6 +850,7 @@ void serve_client(int* client_fd, bool* compress_arr, struct sockaddr_in server,
         {
             create_header_fields_hashmap(&request);
             create_query_parameters_hashmap(&request);
+            create_cookies_hashmap(&request);
 
             // Determine if the request is keep-alive
             client->keep_alive = is_keep_alive(request);
@@ -840,6 +922,11 @@ void serve_client(int* client_fd, bool* compress_arr, struct sockaddr_in server,
             if (request.query_parameters != NULL)
             {
                 g_hash_table_destroy(request.query_parameters);
+            }
+
+            if (request.cookies != NULL)
+            {
+                g_hash_table_destroy(request.cookies);
             }
         }
     }
