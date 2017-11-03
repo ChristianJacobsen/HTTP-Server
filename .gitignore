@@ -130,5 +130,4 @@ $RECYCLE.BIN/
 
 # Custom
 src/httpd
-!src/http.tab.o
-!src/lex.yy.o
+src/httpd_logfile

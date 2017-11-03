@@ -23,6 +23,12 @@
 #include <glib/gprintf.h>
 #include <signal.h>
 
+/* === Structs === */
+struct client {
+    struct sockaddr_in sockaddr;
+    gint64 last_heard;
+};
+
 /* === Global variables, mostly constants ===*/
 const int message_buffer_size = 100 * 1024; // Size of the message buffer
 #define max_connections 300 // Maximum number of clients. Needs to be define instead of const due to the struct fds
@@ -159,17 +165,17 @@ void clean_up()
  * Checks all the keep-alive times and closes the connection
  * if it should not be alive any more as per the maximum keep-alive time
  */
-void check_keep_alives(gint64* keep_alive_times, bool* compress_arr)
+void check_keep_alives(struct client* clients, bool* compress_arr)
 {
     // Get the current time
     gint64 current_time = g_get_real_time();
     for (int i = 1; i < nfds; i++)
     {
         // Only check open keep-alive connections
-        if (fds[i].fd != -1 && keep_alive_times[i] != 0)
+        if (fds[i].fd != -1 && clients[i].last_heard != 0)
         {
             // Get the difference
-            gint64 diff = current_time - keep_alive_times[i];
+            gint64 diff = current_time - clients[i].last_heard;
 
             // Close the connection if it matches or is above the maximum keep-alive time
             if (max_keep_alive_time <= diff)
@@ -183,7 +189,7 @@ void check_keep_alives(gint64* keep_alive_times, bool* compress_arr)
 /*
  * Shift all the arrays in order to re-use them
  */
-void compress_array(bool* compress_arr, struct sockaddr_in* clients, gint64* keep_alive_times)
+void compress_array(bool* compress_arr, struct client* clients)
 {
     *compress_arr = false;
     for (int i = 0; i < nfds; i++)
@@ -195,7 +201,6 @@ void compress_array(bool* compress_arr, struct sockaddr_in* clients, gint64* kee
             {
                 fds[j].fd = fds[j + 1].fd;
                 clients[j] = clients[j + 1];
-                keep_alive_times[j] = keep_alive_times[j + 1];
             }
             i--;
             nfds--;
@@ -567,7 +572,7 @@ void handle_bad_request(int connfd, struct sockaddr_in client)
  * Determines if a request is keep-alive
  * Uses one of the handle_X functions based on the request
  */
-void serve_client(int* client_fd, bool* compress_arr, struct sockaddr_in server, struct sockaddr_in client, gint64* keep_alive_time)
+void serve_client(int* client_fd, bool* compress_arr, struct sockaddr_in server, struct client* client)
 {
     bool close_conn = false;
     bool keep_alive = false;
@@ -598,7 +603,7 @@ void serve_client(int* client_fd, bool* compress_arr, struct sockaddr_in server,
         // Bad request if not valid
         if (!valid)
         {
-            handle_bad_request(*client_fd, client);
+            handle_bad_request(*client_fd, client->sockaddr);
             close_conn = true;
         }
         // Valid request
@@ -610,7 +615,7 @@ void serve_client(int* client_fd, bool* compress_arr, struct sockaddr_in server,
 
             if (g_strcmp0(http_version->str, HTTP_V1) != 0 && g_strcmp0(http_version->str, HTTP_V0) != 0)
             {
-                handle_other(*client_fd, client, http_method, requested_url);
+                handle_other(*client_fd, client->sockaddr, http_method, requested_url);
                 close_conn = true;
             }
             else
@@ -621,22 +626,22 @@ void serve_client(int* client_fd, bool* compress_arr, struct sockaddr_in server,
                 // GET Request
                 if (g_strcmp0(http_method->str, "GET") == 0)
                 {
-                    handle_GET(*client_fd, server, client, http_method, requested_url, host, keep_alive);
+                    handle_GET(*client_fd, server, client->sockaddr, http_method, requested_url, host, keep_alive);
                 }
                 // HEAD Request
                 else if (g_strcmp0(http_method->str, "HEAD") == 0)
                 {
-                    handle_HEAD(*client_fd, server, client, http_method, requested_url, host, keep_alive);
+                    handle_HEAD(*client_fd, server, client->sockaddr, http_method, requested_url, host, keep_alive);
                 }
                 // POST Request
                 else if (g_strcmp0(http_method->str, "POST") == 0)
                 {
-                    handle_POST(*client_fd, server, client, http_method, requested_url, host, body, keep_alive);
+                    handle_POST(*client_fd, server, client->sockaddr, http_method, requested_url, host, body, keep_alive);
                 }
                 // Not supported request
                 else
                 {
-                    handle_other(*client_fd, client, http_method, requested_url);
+                    handle_other(*client_fd, client->sockaddr, http_method, requested_url);
                     close_conn = true;
                 }
             }
@@ -663,7 +668,7 @@ void serve_client(int* client_fd, bool* compress_arr, struct sockaddr_in server,
     else
     {
         // Store the current time for this client
-        *keep_alive_time = g_get_real_time();
+        client->last_heard = g_get_real_time();
     }
 }
 
@@ -671,10 +676,10 @@ void serve_client(int* client_fd, bool* compress_arr, struct sockaddr_in server,
  * Add a new client
  * Determines if the client buffer is full and if so, rejects the client.
  */
-void add_client(int sockfd, socklen_t len, struct sockaddr_in* clients, gint64* keep_alive_times)
+void add_client(int sockfd, socklen_t len, struct client* clients)
 {
     // Accept a client
-    int connfd = accept(sockfd, (struct sockaddr *)&clients[nfds], &len);
+    int connfd = accept(sockfd, (struct sockaddr *)&clients[nfds].sockaddr, &len);
 
     // Check for error
     if (connfd < 0)
@@ -704,7 +709,7 @@ void add_client(int sockfd, socklen_t len, struct sockaddr_in* clients, gint64* 
     setsockopt(connfd, SOL_SOCKET, SO_RCVTIMEO, (char *)&timeout, sizeof(timeout));
 
     // Add the client
-    keep_alive_times[nfds] = 0;
+    clients[nfds].last_heard = 0;
     fds[nfds].fd = connfd;
     fds[nfds].events = POLLIN;
     nfds++;
@@ -713,7 +718,7 @@ void add_client(int sockfd, socklen_t len, struct sockaddr_in* clients, gint64* 
 /*
  * Check all the clients for activity
  */
-void check_clients(bool* compress_arr, struct sockaddr_in* clients, gint64* keep_alive_times, struct sockaddr_in server, int sockfd)
+void check_clients(bool* compress_arr, struct client* clients, struct sockaddr_in server, int sockfd)
 {
     int current_size = nfds;
     bool close_conn = false;
@@ -747,19 +752,19 @@ void check_clients(bool* compress_arr, struct sockaddr_in* clients, gint64* keep
         // Add client if new connection
         if (fds[i].fd == sockfd)
         {
-            add_client(sockfd, len, clients, keep_alive_times);
+            add_client(sockfd, len, clients);
         }
         // Serve client if existing connection
         else
         {
-            serve_client(&fds[i].fd, compress_arr, server, clients[i], &keep_alive_times[i]);
+            serve_client(&fds[i].fd, compress_arr, server, &clients[i]);
         }
     }
 
     // Compress the arrays if the flag is set, only set if a connection was closed
     if (*compress_arr)
     {
-        compress_array(compress_arr, clients, keep_alive_times);
+        compress_array(compress_arr, clients);
     }
 }
 
@@ -767,7 +772,7 @@ void check_clients(bool* compress_arr, struct sockaddr_in* clients, gint64* keep
  * Run the server loop
  * Polls for activity, adds and serves clients
  */
-void run_loop(struct sockaddr_in* clients, gint64* keep_alive_times, struct sockaddr_in server, int sockfd)
+void run_loop(struct client* clients, struct sockaddr_in server, int sockfd)
 {
     bool compress_arr = false;
     
@@ -781,18 +786,18 @@ void run_loop(struct sockaddr_in* clients, gint64* keep_alive_times, struct sock
         }
 
         // Check keep-alive times
-        check_keep_alives(keep_alive_times, &compress_arr);
+        check_keep_alives(clients, &compress_arr);
 
         // If any client was closed due to keep-alive, compress the arrays
         if (compress_arr)
         {
-            compress_array(&compress_arr, clients, keep_alive_times);
+            compress_array(&compress_arr, clients);
         }
 
         // Check the clients if poll did not timeout
         if (poll_value != 0)
         {
-            check_clients(&compress_arr, clients, keep_alive_times, server, sockfd);
+            check_clients(&compress_arr, clients, server, sockfd);
         }
     }
 }
@@ -835,8 +840,8 @@ int main(int argc, char **argv)
     int on = 1; // Only uses for setting SO_REUSEADDR on the listen socket
     struct sockaddr_in server; // The server sockaddr
 
-    struct sockaddr_in clients[max_connections]; // Client sockaddr's
-    gint64 keep_alive_times[max_connections]; // Keep-alive times for client
+    struct client clients[max_connections]; // Client sockaddr's
+   //gint64 keep_alive_times[max_connections]; // Keep-alive times for client
 
     // Create and bind a TCP socket.
     sockfd = socket(AF_INET, SOCK_STREAM, 0);
@@ -897,7 +902,7 @@ int main(int argc, char **argv)
     // Clear the client arrays
     memset(fds, 0, sizeof(fds));
     memset(clients, 0, sizeof(clients));
-    memset(keep_alive_times, 0, sizeof(keep_alive_times));
+    //memset(keep_alive_times, 0, sizeof(keep_alive_times));
 
     // Set the listening socket
     fds[0].fd = sockfd;
@@ -907,7 +912,7 @@ int main(int argc, char **argv)
     g_printf("Listening on port %d...\n", port);
 
     // Run the server loop
-    run_loop(clients, keep_alive_times, server, sockfd);
+    run_loop(clients, server, sockfd);
 
     // Clean up the server if control reaches here
     clean_up();
