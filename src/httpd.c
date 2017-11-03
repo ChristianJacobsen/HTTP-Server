@@ -62,8 +62,11 @@ int nfds = 1; // Number of file descriptors in the fds array (number of clients)
 const int poll_timeout = (30 * 1000); // The timeout of the poll, 30 seconds
 const char* HTTP_V1 = "HTTP/1.1"; // HTTP version 1.1
 const char* HTTP_V0 = "HTTP/1.0"; // HTTP version 1.0
+const char *html_color_start = "<!DOCTYPE html>\n<html lang=\"en\">\n\t<head>\n\t\t<title>HTTP Server response</title>\n\t\t<meta charset=\"UTF-8\">\n\t\t<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\t</head>\n\t<body style=\"background-color:";
+const char *html_color_end = "\">\n\t</body>\n</html>\n";
 const char *html_start = "<!DOCTYPE html>\n<html lang=\"en\">\n\t<head>\n\t\t<title>HTTP Server response</title>\n\t\t<meta charset=\"UTF-8\">\n\t\t<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\t</head>\n\t<body>\n\t\t";
 const char *html_end = "\n\t</body>\n</html>\n";
+
 FILE *log_file = NULL; // Log file pointer
 
 // HTTP Parser stuff
@@ -208,6 +211,8 @@ bool is_keep_alive(struct http_request request)
 
 void create_query_parameters_hashmap(struct http_request* request)
 {
+    request->query_parameters = g_hash_table_new_full(g_str_hash, g_str_equal, (GDestroyNotify) free_destroyed, (GDestroyNotify) free_destroyed);
+
     // Split the URL to get the query part
     gchar** query_part = g_strsplit(request->requested_url->str, "?", 2);
 
@@ -224,8 +229,6 @@ void create_query_parameters_hashmap(struct http_request* request)
     g_strfreev(query_part);
 
     guint len = g_strv_length(queries);
-
-    request->query_parameters = g_hash_table_new_full(g_str_hash, g_str_equal, (GDestroyNotify) free_destroyed, (GDestroyNotify) free_destroyed);
 
     gchar** query_split = NULL;
 
@@ -275,11 +278,11 @@ void create_query_parameters_hashmap(struct http_request* request)
 
 void create_header_fields_hashmap(struct http_request* request)
 {
+    request->header_fields = g_hash_table_new_full(g_str_hash, g_str_equal, (GDestroyNotify) free_destroyed, (GDestroyNotify) free_destroyed);
+
     // Split the header and get the length
     gchar** fields = g_strsplit(request->header->str, "\r\n", -1);
     guint len = g_strv_length(fields);
-
-    request->header_fields = g_hash_table_new_full(g_str_hash, g_str_equal, (GDestroyNotify) free_destroyed, (GDestroyNotify) free_destroyed);
 
     gchar** field_split = NULL;
 
@@ -309,6 +312,41 @@ void create_header_fields_hashmap(struct http_request* request)
 
     g_strfreev(field_split);
     g_strfreev(fields);
+}
+
+bool is_page(char* page, char* url)
+{
+    if (!g_str_has_prefix(url, page))
+    {
+        g_printf("Prefix\n");
+        return false;
+    }
+
+    char** split = g_strsplit(url, page, 2);
+
+    if (g_strv_length(split) != 2)
+    {
+        g_printf("Split len\n");
+        g_strfreev(split);
+        return false;
+    }
+
+    int len = strlen(split[1]);
+
+    if (len == 1 && split[1][0] != '/' && split[1][0] != '?')
+    {
+        g_printf("Len 1\n");
+        return false;
+    }
+
+    if (2 <= len && !g_str_has_prefix(split[1], "/?") && !g_str_has_prefix(split[1], "?"))
+    {
+        g_printf("Len 2\n");
+        return false;
+    }
+
+    g_strfreev(split);
+    return true;
 }
 
 /*
@@ -368,12 +406,21 @@ bool parse_message(char* message, struct http_request* request)
     {
         gchar* lowercased = g_ascii_strdown(request->requested_url->str, -1);
 
-        if (g_str_has_prefix(lowercased, "/test"))
+        g_printf("%s\n", request->requested_url->str);
+
+        if (is_page("/test", request->requested_url->str))
         {
+            g_printf("TEST PAGE\n");
             request->page = TEST;
+        }
+        else if (is_page("/color", request->requested_url->str))
+        {
+            g_printf("COLOR PAGE\n");
+            request->page = COLOR;
         }
         else
         {
+            g_printf("OTHER PAGE\n");
             request->page = OTHER;
         }
 
@@ -426,58 +473,69 @@ GString* create_header(const char* http_version, const int http_code, const char
  */
 GString* create_html(bool is_post, struct sockaddr_in server, struct client client, struct http_request request)
 {
-    // Get the port of server
-    int server_port;
-    get_port(server, &server_port);
-
-    // Get the IPv4 address and port of client
-    int client_ip1, client_ip2, client_ip3, client_ip4, client_port;
-    get_ip(client.sockaddr, &client_ip1, &client_ip2, &client_ip3, &client_ip4);
-    get_port(client.sockaddr, &client_port);
-
     GString* html = g_string_new("");
-    GString* server_URL = g_string_new("");
-    GString* client_URL = g_string_new("");
 
-    // Construct the server URL
-    if (request.host != NULL)
+    if (request.page == COLOR)
     {
-        g_string_printf(server_URL, "%s", request.host);
+        char* color = (char*) g_hash_table_lookup(request.query_parameters, "bg");
+
+        // Construct the initial body
+        g_string_printf(html, "%s%s%s", html_color_start, color, html_color_end);
     }
-    // If Host header is not provided, default to localhost
     else
     {
-        g_string_printf(server_URL, "localhosty:%d", server_port);
-    }
+        // Get the port of server
+        int server_port;
+        get_port(server, &server_port);
 
-    // Construct the client URL
-    g_string_printf(client_URL, "%d.%d.%d.%d:%d", client_ip1, client_ip2, client_ip3, client_ip4, client_port);
+        // Get the IPv4 address and port of client
+        int client_ip1, client_ip2, client_ip3, client_ip4, client_port;
+        get_ip(client.sockaddr, &client_ip1, &client_ip2, &client_ip3, &client_ip4);
+        get_port(client.sockaddr, &client_port);
 
-    // Construct the initial body
-    g_string_printf(html, "%shttp://%s%s %s", html_start, server_URL->str, request.requested_url->str, client_URL->str);
+        GString* server_URL = g_string_new("");
+        GString* client_URL = g_string_new("");
 
-    // Append a custom body if post
-    if (is_post)
-    {
-        g_string_append_printf(html, "\n%s", request.body->str);
-    }
-    else if (request.page == TEST && request.query_parameters != NULL)
-    {
-        GHashTableIter iter;
-        gpointer key, value;
-        
-        g_hash_table_iter_init (&iter, request.query_parameters);
-        while (g_hash_table_iter_next (&iter, &key, &value))
+        // Construct the server URL
+        if (request.host != NULL)
         {
-            g_string_append_printf(html, "\n%s: %s", (char*) key, (char*) value);
+            g_string_printf(server_URL, "%s", request.host);
         }
+        // If Host header is not provided, default to localhost
+        else
+        {
+            g_string_printf(server_URL, "localhosty:%d", server_port);
+        }
+
+        // Construct the client URL
+        g_string_printf(client_URL, "%d.%d.%d.%d:%d", client_ip1, client_ip2, client_ip3, client_ip4, client_port);
+
+        // Construct the initial body
+        g_string_printf(html, "%shttp://%s%s %s", html_start, server_URL->str, request.requested_url->str, client_URL->str);
+
+        // Append a custom body if post
+        if (is_post)
+        {
+            g_string_append_printf(html, "\n%s", request.body->str);
+        }
+        else if (request.page == TEST && request.query_parameters != NULL)
+        {
+            GHashTableIter iter;
+            gpointer key, value;
+            
+            g_hash_table_iter_init (&iter, request.query_parameters);
+            while (g_hash_table_iter_next (&iter, &key, &value))
+            {
+                g_string_append_printf(html, "\n\t\t%s: %s", (char*) key, (char*) value);
+            }
+        }
+
+        // Append the HTML end
+        g_string_append_printf(html, "%s", html_end);
+
+        g_string_free(server_URL, TRUE);
+        g_string_free(client_URL, TRUE);
     }
-
-    // Append the HTML end
-    g_string_append_printf(html, "%s", html_end);
-
-    g_string_free(server_URL, TRUE);
-    g_string_free(client_URL, TRUE);
 
     return html;
 }
