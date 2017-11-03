@@ -27,6 +27,18 @@
 struct client {
     struct sockaddr_in sockaddr;
     gint64 last_heard;
+    bool keep_alive;
+};
+
+struct http_request {
+    GHashTable* header_fields;
+    GHashTable* query_parameters;
+    char* host;
+    GString* http_method;
+    GString* requested_url;
+    GString* http_version;
+    GString* header;
+    GString* body;
 };
 
 /* === Global variables, mostly constants ===*/
@@ -67,64 +79,6 @@ void get_port(struct sockaddr_in addr, int *port)
 {
     *port = (addr.sin_port & 0xFF) << 8;
     *port = *port | ((addr.sin_port >> 8) & 0xFF);
-}
-
-/*
- * Get a value for a specific header field
- * Returns an allocated GString if success, otherwise a NULL pointer
- */
-GString* get_header_field_value(GString* header, char* header_field)
-{
-    // Split the header and get the length
-    gchar** fields = g_strsplit(header->str, "\r\n", -1);
-    guint len = g_strv_length(fields);
-
-    // Lowercase the header field input for comparison
-    gchar* lowercase_header_field = g_ascii_strdown(header_field, -1);
-
-    gchar** field_split = NULL;
-    GString* field_value = NULL;
-    gchar* lowercased = NULL;
-
-    // Start at the first field
-    for(guint i = 1; i < len; i++)
-    {   
-        // Split the header field into name and value
-        field_split = g_strsplit(fields[i], ":", 2);
-
-        if (field_split == NULL)
-        {
-            continue;
-        }
-
-        // Lowercase the field name for comparison
-        lowercased = g_ascii_strdown(field_split[0], -1);
-
-        if (g_strcmp0(lowercase_header_field, lowercased) == 0)
-        {   
-            // Field found. Trim whitespace, lowercase and assign the field value
-            g_strstrip(field_split[1]);
-            gchar* lowercased_value = g_ascii_strdown(field_split[1], -1); 
-
-            field_value = g_string_new(lowercased_value);
-
-            g_free(lowercased_value);
-            break;
-        }
-        
-        g_free(lowercased);
-        g_strfreev(field_split);
-
-        field_split = NULL;
-        lowercased = NULL;
-    }
-
-    g_free(lowercased);
-    g_free(lowercase_header_field);
-    g_strfreev(field_split);
-    g_strfreev(fields);
-
-    return field_value;
 }
 
 /*
@@ -211,27 +165,29 @@ void compress_array(bool* compress_arr, struct client* clients)
 /*
  * Check if the connection should be keep-alive
  */
-bool is_keep_alive(GString* header, GString* http_version)
+bool is_keep_alive(struct http_request request)
 {
     // Get the Connection header field value
-    GString* connection_value = get_header_field_value(header, "Connection");
+    char* connection_value = (char*) g_hash_table_lookup(request.header_fields, "connection");
     bool keep_alive = false;
 
     // Connection header exists
     if (connection_value != NULL)
     {
-        if (g_strcmp0(connection_value->str, "keep-alive") == 0)
+        gchar* lowercased = g_ascii_strdown(connection_value, -1);
+
+        if (g_strcmp0(lowercased, "keep-alive") == 0)
         {
             keep_alive = true;
         }
 
-        g_string_free(connection_value, TRUE);
+        g_free(lowercased);
     }
     // HTTP Version
     else
     {
         // Set to keep alive if HTTP/1.1
-        if (g_strcmp0(http_version->str, HTTP_V1) == 0)
+        if (g_strcmp0(request.http_version->str, HTTP_V1) == 0)
         {
             keep_alive = true;
         }
@@ -240,25 +196,116 @@ bool is_keep_alive(GString* header, GString* http_version)
     return keep_alive;
 }
 
+void create_query_parameters_hashmap(struct http_request* request)
+{
+    // Split the URL to get the query part
+    gchar** query_part = g_strsplit(request->requested_url->str, "?", -1);
+
+    if (g_strv_length(query_part) <= 1)
+    {
+        g_strfreev(query_part);
+        return;
+    }
+
+    gchar** queries = g_strsplit(query_part[1], "&", -1);
+    guint len = g_strv_length(queries);
+
+    request->query_parameters = g_hash_table_new(g_str_hash, g_str_equal);
+
+    gchar** query_split = NULL;
+
+    // Start at the first query parameter
+    for(guint i = 1; i < len; i++)
+    {   
+        // Split the query parameter into key and value
+        query_split = g_strsplit(queries[i], "=", 2);
+
+        if (query_split == NULL)
+        {
+            continue;
+        }
+
+        g_hash_table_insert(request->query_parameters, query_split[0], query_split[1]);
+        
+        g_strfreev(query_split);
+
+        query_split = NULL;
+    }
+
+    if (query_split != NULL)
+    {
+        g_strfreev(query_split);
+    }
+
+    if (queries != NULL)
+    {
+        g_strfreev(queries);
+    }
+}
+
+void create_header_fields_hashmap(struct http_request* request)
+{
+    // Split the header and get the length
+    gchar** fields = g_strsplit(request->header->str, "\r\n", -1);
+    guint len = g_strv_length(fields);
+
+    request->header_fields = g_hash_table_new(g_str_hash, g_str_equal);
+
+    gchar** field_split = NULL;
+    gchar* lowercased = NULL;
+
+    // Start at the first field
+    for(guint i = 1; i < len; i++)
+    {   
+        // Split the header field into name and value
+        field_split = g_strsplit(fields[i], ":", 2);
+
+        if (field_split == NULL)
+        {
+            continue;
+        }
+
+        // Lowercase the field name
+        lowercased = g_ascii_strdown(field_split[0], -1);
+
+        g_hash_table_insert(request->header_fields, field_split[0], field_split[1]);
+        
+        g_free(lowercased);
+        g_strfreev(field_split);
+
+        field_split = NULL;
+        lowercased = NULL;
+    }
+
+    g_free(lowercased);
+    g_strfreev(field_split);
+    g_strfreev(fields);
+}
+
 /*
  * Parse the HTTP header and make sure it is valid.
  * Extracts the header, body, HTTP method, requested URL and HTTP version as allocated GStrings
  * Returns whether or not the message is valid, if not, nothing it allocated.
  */
-bool parse_message(char* message, GString** header, GString** body, GString** http_method, GString** requested_url, GString** http_version)
+bool parse_message(char* message, struct http_request* request)
 {   
+    //g_printf("PARSING MESSAGE\n");
     // Split message into header and body by two CLRF's in a row
     gchar** split = g_strsplit(message, "\r\n\r\n", 2);
+    //g_printf("SPLIT\n");
 
     if (split == NULL && split[0] == NULL)
     {
+        //g_printf("SPLIT NULL\n");
         return false;
     }
 
+    //g_printf("APPEND\n");
     // Add the double CLRF's to the header and parse
     GString* complete_header = g_string_new(split[0]);
     g_string_append_printf(complete_header, "\r\n\r\n");
 
+    //g_printf("PARSER\n");
     // Parser sets the VALID bool.
     extern FILE* yyin;
     yyin = fmemopen(complete_header->str, complete_header->len, "r");
@@ -268,41 +315,52 @@ bool parse_message(char* message, GString** header, GString** body, GString** ht
 
     g_string_free(complete_header, TRUE);
 
+    //g_printf("CHECKING VALID\n");
     if (!VALID)
     {
+        //g_printf("NOT VALID\n");
         g_strfreev(split);
         return false;
     }
 
+    //g_printf("ASSIGN HEAD\n");
     // Assign header and body
-    *header = g_string_new(split[0]);
-    *body = g_string_new(split[1]);
+    request->header = g_string_new(split[0]);
+    //g_printf("ASSIGN BODY\n");
+    request->body = g_string_new(split[1]);
 
     g_strfreev(split);
     split = NULL;
 
+    //g_printf("ANOTHER SPLIT\n");
     // Split the header into the status line and header fields
-    split = g_strsplit((*header)->str, "\r\n", 2);
+    split = g_strsplit(request->header->str, "\r\n", 2);
+    //g_printf("AND ANOTHER SPLIT\n");
     gchar** status_line_split = g_strsplit(split[0], " ", 3);
 
     g_strfreev(split);
     split = NULL;
 
+    //g_printf("HTTP METHOD\n");
     // Assign the HTTP Method and requested URL
-    *http_method = g_string_new(status_line_split[0]);
-    *requested_url = g_string_new(status_line_split[1]);
+    request->http_method = g_string_new(status_line_split[0]);
+    //g_printf("REQUEST URL\n");
+    request->requested_url = g_string_new(status_line_split[1]);
 
+    //g_printf("FINAL SPLIT\n");
     // Split the HTTP version into the actual version and CLRF
     split = g_strsplit(status_line_split[2], "\r\n", 2);
 
     g_strfreev(status_line_split);
     status_line_split = NULL;
 
+    //g_printf("HTTP VERSION\n");
     // Assign the HTTP version
-    *http_version = g_string_new(split[0]);
+    request->http_version = g_string_new(split[0]);
 
     g_strfreev(split);
 
+    //g_printf("DONE PARSING\n");
     return true;
 }
 
@@ -336,7 +394,7 @@ GString* create_header(const char* http_version, const int http_code, const char
 /*
  * Create the HTML "file" with an optional custom body
  */
-GString* create_html(struct sockaddr_in server, struct sockaddr_in client, GString* requested_url, GString* host, GString* body)
+GString* create_html(bool is_post, struct sockaddr_in server, struct client client, struct http_request request)
 {
     // Get the port of server
     int server_port;
@@ -344,17 +402,17 @@ GString* create_html(struct sockaddr_in server, struct sockaddr_in client, GStri
 
     // Get the IPv4 address and port of client
     int client_ip1, client_ip2, client_ip3, client_ip4, client_port;
-    get_ip(client, &client_ip1, &client_ip2, &client_ip3, &client_ip4);
-    get_port(client, &client_port);
+    get_ip(client.sockaddr, &client_ip1, &client_ip2, &client_ip3, &client_ip4);
+    get_port(client.sockaddr, &client_port);
 
     GString* html = g_string_new("");
     GString* server_URL = g_string_new("");
     GString* client_URL = g_string_new("");
 
     // Construct the server URL
-    if (host != NULL)
+    if (request.host != NULL)
     {
-        g_string_printf(server_URL, "%s", host->str);
+        g_string_printf(server_URL, "%s", request.host);
     }
     // If Host header is not provided, default to localhost
     else
@@ -366,12 +424,12 @@ GString* create_html(struct sockaddr_in server, struct sockaddr_in client, GStri
     g_string_printf(client_URL, "%d.%d.%d.%d:%d", client_ip1, client_ip2, client_ip3, client_ip4, client_port);
 
     // Construct the initial body
-    g_string_printf(html, "%shttp://%s%s %s", html_start, server_URL->str, requested_url->str, client_URL->str);
+    g_string_printf(html, "%shttp://%s%s %s", html_start, server_URL->str, request.requested_url->str, client_URL->str);
 
     // Append a custom body if specified
-    if (body != NULL)
+    if (is_post)
     {
-        g_string_append_printf(html, "\n%s", body->str);
+        g_string_append_printf(html, "\n%s", request.body->str);
     }
 
     // Append the HTML end
@@ -389,10 +447,10 @@ GString* create_html(struct sockaddr_in server, struct sockaddr_in client, GStri
  * Content-Length, Content-Type and Connection:close if this is not keep-alive.
  * Adds the HTML file to the message body of the response if not a HEAD request
  */
-GString* create_response(bool is_head, struct sockaddr_in server, struct sockaddr_in client, GString* requested_url, GString* host, GString* body, bool keep_alive)
+GString* create_response(bool is_head, bool is_post, struct sockaddr_in server, struct client client, struct http_request request)
 {
     // Create HTML
-    GString* html = create_html(server, client, requested_url, host, body);
+    GString* html = create_html(is_post, server, client, request);
 
     // Get the HTML size as "char bytes"
     GString* html_size = g_string_new("");
@@ -408,7 +466,7 @@ GString* create_response(bool is_head, struct sockaddr_in server, struct sockadd
     add_header_field(&header, "Content-Type", "text/html");
 
     // Add Connection: close if not a keep-alive
-    if (!keep_alive)
+    if (!client.keep_alive)
     {
         add_header_field(&header, "Connection", "close");
     }
@@ -441,12 +499,12 @@ GString* create_response(bool is_head, struct sockaddr_in server, struct sockadd
  * Logs a request to the log file
  * Constructs the log message
  */
-void log_request(struct sockaddr_in client, GString* http_method, GString* requested_url, int status_code)
+void log_request(struct client client, struct http_request request, int status_code)
 {
     // Get the IPv4 address and port
     int ip1, ip2, ip3, ip4, port;
-    get_ip(client, &ip1, &ip2, &ip3, &ip4);
-    get_port(client, &port);
+    get_ip(client.sockaddr, &ip1, &ip2, &ip3, &ip4);
+    get_port(client.sockaddr, &port);
 
     // Construct the timestamp
     // Source: https://stackoverflow.com/questions/1442116/how-to-get-date-and-time-value-in-c-program
@@ -457,15 +515,14 @@ void log_request(struct sockaddr_in client, GString* http_method, GString* reque
     GString* log_message = g_string_new("");
     g_string_printf(log_message, "%d-%02d-%02dT%02d:%02d:%02dZ : <%d.%d.%d.%d>:<%d>", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec, ip1, ip2, ip3, ip4, port);
     
-    // Empty HTTP method and requested URL
-    if (http_method == NULL)
+    // Bad request
+    if (request.http_method == NULL)
     {
         g_string_append_printf(log_message, " <> <> : <%d>", status_code);
     }
-    // Non-empty
     else
     {
-        g_string_append_printf(log_message, " <%s> <%s> : <%d>", http_method->str, requested_url->str, status_code);
+        g_string_append_printf(log_message, " <%s> <%s> : <%d>", request.http_method->str, request.requested_url->str, status_code);
     }
 
     // Log the message, the log file pointer should be open over the course of the program
@@ -478,16 +535,16 @@ void log_request(struct sockaddr_in client, GString* http_method, GString* reque
  * Handles a GET request
  * Creates, sends the response and logs the request
  */
-void handle_GET(int connfd, struct sockaddr_in server, struct sockaddr_in client, GString* http_method, GString* requested_url, GString* host, bool keep_alive)
+void handle_GET(int connfd, struct sockaddr_in server, struct client client, struct http_request request)
 {
     // Create response
-    GString* response = create_response(false, server, client, requested_url, host, NULL, keep_alive);
+    GString* response = create_response(false, false, server, client, request);
 
     // Send response
     send(connfd, response->str, response->len, 0);
 
     // Log request
-    log_request(client, http_method, requested_url, 200);
+    log_request(client, request, 200);
 
     g_string_free(response, TRUE);
 }
@@ -496,16 +553,16 @@ void handle_GET(int connfd, struct sockaddr_in server, struct sockaddr_in client
  * Handles a HEAD request
  * Creates, sends the response and logs the request
  */
-void handle_HEAD(int connfd, struct sockaddr_in server, struct sockaddr_in client, GString* http_method, GString* requested_url, GString* host, bool keep_alive)
+void handle_HEAD(int connfd, struct sockaddr_in server, struct client client, struct http_request request)
 {
     // Create response
-    GString* response = create_response(true, server, client, requested_url, host, NULL, keep_alive);
+    GString* response = create_response(true, false, server, client, request);
 
     // Send response
     send(connfd, response->str, response->len, 0);
 
     // Log request
-    log_request(client, http_method, requested_url, 200);
+    log_request(client, request, 200);
 
     g_string_free(response, TRUE);
 }
@@ -514,16 +571,16 @@ void handle_HEAD(int connfd, struct sockaddr_in server, struct sockaddr_in clien
  * Handles a GET request.
  * Creates, sends the response and logs the request
  */
-void handle_POST(int connfd, struct sockaddr_in server, struct sockaddr_in client, GString* http_method, GString* requested_url, GString* host, GString* body, bool keep_alive)
+void handle_POST(int connfd, struct sockaddr_in server, struct client client, struct http_request request)
 {
     // Create response
-    GString* response = create_response(false, server, client, requested_url, host, body, keep_alive);
+    GString* response = create_response(false, true, server, client, request);
 
     // Send response
     send(connfd, response->str, response->len, 0);
 
     // Log request
-    log_request(client, http_method, requested_url, 200);
+    log_request(client, request, 200);
 
     g_string_free(response, TRUE);
 }
@@ -532,7 +589,7 @@ void handle_POST(int connfd, struct sockaddr_in server, struct sockaddr_in clien
  * Handles an unsupported request.
  * Creates, sends the response and logs the request
  */
-void handle_other(int connfd, struct sockaddr_in client, GString* http_method, GString* requested_url)
+void handle_other(int connfd, struct client client, struct http_request request)
 {
     // Create response
     GString* response = create_header(HTTP_V1, 501, "Not supported");
@@ -542,7 +599,7 @@ void handle_other(int connfd, struct sockaddr_in client, GString* http_method, G
     send(connfd, response->str, response->len, 0);
 
     // Log request
-    log_request(client, http_method, requested_url, 501);
+    log_request(client, request, 501);
 
     g_string_free(response, TRUE);
 }
@@ -551,7 +608,7 @@ void handle_other(int connfd, struct sockaddr_in client, GString* http_method, G
  * Handles a bad request due to parse errors.
  * Creates, sends the response and logs the request
  */
-void handle_bad_request(int connfd, struct sockaddr_in client)
+void handle_bad_request(int connfd, struct client client, struct http_request request)
 {
     // Create response
     GString* response = create_header(HTTP_V1, 400, "Bad request");
@@ -561,7 +618,7 @@ void handle_bad_request(int connfd, struct sockaddr_in client)
     send(connfd, response->str, response->len, 0);
 
     // Log request
-    log_request(client, NULL, NULL, 400);
+    log_request(client, request, 400);
 
     g_string_free(response, TRUE);
 }
@@ -575,14 +632,16 @@ void handle_bad_request(int connfd, struct sockaddr_in client)
 void serve_client(int* client_fd, bool* compress_arr, struct sockaddr_in server, struct client* client)
 {
     bool close_conn = false;
-    bool keep_alive = false;
 
-    GString* http_method = NULL;
-    GString* requested_url = NULL;
-    GString* http_version = NULL;
-    GString* header = NULL;
-    GString* host = NULL;
-    GString* body = NULL;
+    struct http_request request;
+    request.header_fields = NULL;
+    request.query_parameters = NULL;
+    request.http_method = NULL;
+    request.requested_url = NULL;
+    request.http_version = NULL;
+    request.header = NULL;
+    request.host = NULL;
+    request.body = NULL;
 
     char message[message_buffer_size];
     memset(&message, 0, sizeof(message));
@@ -598,63 +657,90 @@ void serve_client(int* client_fd, bool* compress_arr, struct sockaddr_in server,
     else
     {
         // Validate and parse
-        bool valid = parse_message(message, &header, &body,&http_method, &requested_url, &http_version);
+        bool valid = parse_message(message, &request);
         
         // Bad request if not valid
         if (!valid)
         {
-            handle_bad_request(*client_fd, client->sockaddr);
+            handle_bad_request(*client_fd, *client, request);
             close_conn = true;
         }
         // Valid request
         else
         {
-            // Determine if the request is keep-alive
-            keep_alive = is_keep_alive(header, http_version);
-            close_conn = !keep_alive;
+            create_header_fields_hashmap(&request);
+            create_query_parameters_hashmap(&request);
 
-            if (g_strcmp0(http_version->str, HTTP_V1) != 0 && g_strcmp0(http_version->str, HTTP_V0) != 0)
+            // Determine if the request is keep-alive
+            client->keep_alive = is_keep_alive(request);
+            close_conn = !client->keep_alive;
+
+            if (g_strcmp0(request.http_version->str, HTTP_V1) != 0 && g_strcmp0(request.http_version->str, HTTP_V0) != 0)
             {
-                handle_other(*client_fd, client->sockaddr, http_method, requested_url);
+                handle_other(*client_fd, *client, request);
                 close_conn = true;
             }
             else
             {
                 // Get the Host header field
-                host = get_header_field_value(header, "Host");
+                request.host = (char*) g_hash_table_lookup(request.header_fields, "host");
 
                 // GET Request
-                if (g_strcmp0(http_method->str, "GET") == 0)
+                if (g_strcmp0(request.http_method->str, "GET") == 0)
                 {
-                    handle_GET(*client_fd, server, client->sockaddr, http_method, requested_url, host, keep_alive);
+                    handle_GET(*client_fd, server, *client, request);
                 }
                 // HEAD Request
-                else if (g_strcmp0(http_method->str, "HEAD") == 0)
+                else if (g_strcmp0(request.http_method->str, "HEAD") == 0)
                 {
-                    handle_HEAD(*client_fd, server, client->sockaddr, http_method, requested_url, host, keep_alive);
+                    handle_HEAD(*client_fd, server, *client, request);
                 }
                 // POST Request
-                else if (g_strcmp0(http_method->str, "POST") == 0)
+                else if (g_strcmp0(request.http_method->str, "POST") == 0)
                 {
-                    handle_POST(*client_fd, server, client->sockaddr, http_method, requested_url, host, body, keep_alive);
+                    handle_POST(*client_fd, server, *client, request);
                 }
                 // Not supported request
                 else
                 {
-                    handle_other(*client_fd, client->sockaddr, http_method, requested_url);
+                    handle_other(*client_fd, *client, request);
                     close_conn = true;
                 }
             }
 
-            g_string_free(header, TRUE);
-            g_string_free(body, TRUE);
-            g_string_free(http_method, TRUE);
-            g_string_free(requested_url, TRUE);
-            g_string_free(http_version, TRUE);
-            
-            if (host != NULL)
+            if (request.header != NULL)
             {
-                g_string_free(host, TRUE);
+                g_string_free(request.header, TRUE);
+            }
+
+            if (request.body != NULL)
+            {
+                g_string_free(request.body, TRUE);
+            }
+
+            if (request.http_method != NULL)
+            {
+                g_string_free(request.http_method, TRUE);
+            }
+
+            if (request.requested_url != NULL)
+            {
+                g_string_free(request.requested_url, TRUE);
+            }
+
+            if (request.http_version != NULL)
+            {
+                g_string_free(request.http_version, TRUE);
+            }
+
+            if (request.header_fields != NULL)
+            {
+                g_hash_table_destroy(request.header_fields);
+            }
+
+            if (request.query_parameters != NULL)
+            {
+                g_hash_table_destroy(request.query_parameters);
             }
         }
     }
@@ -709,6 +795,7 @@ void add_client(int sockfd, socklen_t len, struct client* clients)
     setsockopt(connfd, SOL_SOCKET, SO_RCVTIMEO, (char *)&timeout, sizeof(timeout));
 
     // Add the client
+    clients[nfds].keep_alive = false;
     clients[nfds].last_heard = 0;
     fds[nfds].fd = connfd;
     fds[nfds].events = POLLIN;
