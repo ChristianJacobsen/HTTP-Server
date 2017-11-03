@@ -23,6 +23,9 @@
 #include <glib/gprintf.h>
 #include <signal.h>
 
+/* === Enums ===*/
+typedef enum { TEST, COLOR, LOGIN, SECRET, OTHER } page_type;
+
 /* === Structs === */
 struct client {
     struct sockaddr_in sockaddr;
@@ -34,12 +37,19 @@ struct http_request {
     GHashTable* header_fields;
     GHashTable* query_parameters;
     char* host;
+    page_type page;
     GString* http_method;
     GString* requested_url;
     GString* http_version;
     GString* header;
     GString* body;
 };
+
+/* === Destroy functions === */
+void free_destroyed(gpointer data)
+{
+    free(data);
+}
 
 /* === Global variables, mostly constants ===*/
 const int message_buffer_size = 100 * 1024; // Size of the message buffer
@@ -199,33 +209,53 @@ bool is_keep_alive(struct http_request request)
 void create_query_parameters_hashmap(struct http_request* request)
 {
     // Split the URL to get the query part
-    gchar** query_part = g_strsplit(request->requested_url->str, "?", -1);
+    gchar** query_part = g_strsplit(request->requested_url->str, "?", 2);
 
-    if (g_strv_length(query_part) <= 1)
+    g_printf("Number of query parameters: %d\n", g_strv_length(query_part));
+
+    if (g_strv_length(query_part) != 2)
     {
         g_strfreev(query_part);
         return;
     }
 
     gchar** queries = g_strsplit(query_part[1], "&", -1);
+
+    g_strfreev(query_part);
+
     guint len = g_strv_length(queries);
 
-    request->query_parameters = g_hash_table_new(g_str_hash, g_str_equal);
+    request->query_parameters = g_hash_table_new_full(g_str_hash, g_str_equal, (GDestroyNotify) free_destroyed, (GDestroyNotify) free_destroyed);
 
     gchar** query_split = NULL;
 
     // Start at the first query parameter
-    for(guint i = 1; i < len; i++)
+    for(guint i = 0; i < len; i++)
     {   
         // Split the query parameter into key and value
         query_split = g_strsplit(queries[i], "=", 2);
 
         if (query_split == NULL)
         {
+            g_printf("Split null, ignoring\n");
             continue;
         }
 
-        g_hash_table_insert(request->query_parameters, query_split[0], query_split[1]);
+        if (g_strv_length(query_split) == 2)
+        {
+            char* key = g_strdup(query_split[0]);
+            char* value = g_strdup(query_split[1]);
+
+            g_printf("Adding '%s' with value '%s'\n", key, value);
+            g_hash_table_insert(request->query_parameters, key, value);
+        }
+        else
+        {
+            char* key = g_strdup(query_split[0]);
+
+            g_printf("Adding '%s' with empty string\n", key);
+            g_hash_table_insert(request->query_parameters, key, "");
+        }
         
         g_strfreev(query_split);
 
@@ -249,10 +279,9 @@ void create_header_fields_hashmap(struct http_request* request)
     gchar** fields = g_strsplit(request->header->str, "\r\n", -1);
     guint len = g_strv_length(fields);
 
-    request->header_fields = g_hash_table_new(g_str_hash, g_str_equal);
+    request->header_fields = g_hash_table_new_full(g_str_hash, g_str_equal, (GDestroyNotify) free_destroyed, (GDestroyNotify) free_destroyed);
 
     gchar** field_split = NULL;
-    gchar* lowercased = NULL;
 
     // Start at the first field
     for(guint i = 1; i < len; i++)
@@ -265,19 +294,19 @@ void create_header_fields_hashmap(struct http_request* request)
             continue;
         }
 
-        // Lowercase the field name
-        lowercased = g_ascii_strdown(field_split[0], -1);
+        //Lowercase the field name
+        char* lowercased_key = g_ascii_strdown(field_split[0], -1);
+        char* value = g_strstrip(g_strdup(field_split[1]));
 
-        g_hash_table_insert(request->header_fields, field_split[0], field_split[1]);
+        g_printf("Adding header field '%s' with value '%s'\n", lowercased_key, value);
+
+        g_hash_table_insert(request->header_fields, lowercased_key, value);
         
-        g_free(lowercased);
         g_strfreev(field_split);
 
         field_split = NULL;
-        lowercased = NULL;
     }
 
-    g_free(lowercased);
     g_strfreev(field_split);
     g_strfreev(fields);
 }
@@ -288,24 +317,19 @@ void create_header_fields_hashmap(struct http_request* request)
  * Returns whether or not the message is valid, if not, nothing it allocated.
  */
 bool parse_message(char* message, struct http_request* request)
-{   
-    //g_printf("PARSING MESSAGE\n");
+{
     // Split message into header and body by two CLRF's in a row
     gchar** split = g_strsplit(message, "\r\n\r\n", 2);
-    //g_printf("SPLIT\n");
 
     if (split == NULL && split[0] == NULL)
     {
-        //g_printf("SPLIT NULL\n");
         return false;
     }
 
-    //g_printf("APPEND\n");
     // Add the double CLRF's to the header and parse
     GString* complete_header = g_string_new(split[0]);
     g_string_append_printf(complete_header, "\r\n\r\n");
 
-    //g_printf("PARSER\n");
     // Parser sets the VALID bool.
     extern FILE* yyin;
     yyin = fmemopen(complete_header->str, complete_header->len, "r");
@@ -315,52 +339,58 @@ bool parse_message(char* message, struct http_request* request)
 
     g_string_free(complete_header, TRUE);
 
-    //g_printf("CHECKING VALID\n");
     if (!VALID)
     {
-        //g_printf("NOT VALID\n");
         g_strfreev(split);
         return false;
     }
 
-    //g_printf("ASSIGN HEAD\n");
     // Assign header and body
     request->header = g_string_new(split[0]);
-    //g_printf("ASSIGN BODY\n");
     request->body = g_string_new(split[1]);
 
     g_strfreev(split);
     split = NULL;
 
-    //g_printf("ANOTHER SPLIT\n");
     // Split the header into the status line and header fields
     split = g_strsplit(request->header->str, "\r\n", 2);
-    //g_printf("AND ANOTHER SPLIT\n");
     gchar** status_line_split = g_strsplit(split[0], " ", 3);
 
     g_strfreev(split);
     split = NULL;
 
-    //g_printf("HTTP METHOD\n");
     // Assign the HTTP Method and requested URL
     request->http_method = g_string_new(status_line_split[0]);
-    //g_printf("REQUEST URL\n");
     request->requested_url = g_string_new(status_line_split[1]);
 
-    //g_printf("FINAL SPLIT\n");
+    // Get the page type
+    if (request->requested_url != NULL)
+    {
+        gchar* lowercased = g_ascii_strdown(request->requested_url->str, -1);
+
+        if (g_str_has_prefix(lowercased, "/test"))
+        {
+            request->page = TEST;
+        }
+        else
+        {
+            request->page = OTHER;
+        }
+
+        g_free(lowercased);
+    }
+
     // Split the HTTP version into the actual version and CLRF
     split = g_strsplit(status_line_split[2], "\r\n", 2);
 
     g_strfreev(status_line_split);
     status_line_split = NULL;
 
-    //g_printf("HTTP VERSION\n");
     // Assign the HTTP version
     request->http_version = g_string_new(split[0]);
 
     g_strfreev(split);
 
-    //g_printf("DONE PARSING\n");
     return true;
 }
 
@@ -417,7 +447,7 @@ GString* create_html(bool is_post, struct sockaddr_in server, struct client clie
     // If Host header is not provided, default to localhost
     else
     {
-        g_string_printf(server_URL, "localhost:%d", server_port);
+        g_string_printf(server_URL, "localhosty:%d", server_port);
     }
 
     // Construct the client URL
@@ -426,10 +456,21 @@ GString* create_html(bool is_post, struct sockaddr_in server, struct client clie
     // Construct the initial body
     g_string_printf(html, "%shttp://%s%s %s", html_start, server_URL->str, request.requested_url->str, client_URL->str);
 
-    // Append a custom body if specified
+    // Append a custom body if post
     if (is_post)
     {
         g_string_append_printf(html, "\n%s", request.body->str);
+    }
+    else if (request.page == TEST && request.query_parameters != NULL)
+    {
+        GHashTableIter iter;
+        gpointer key, value;
+        
+        g_hash_table_iter_init (&iter, request.query_parameters);
+        while (g_hash_table_iter_next (&iter, &key, &value))
+        {
+            g_string_append_printf(html, "\n%s: %s", (char*) key, (char*) value);
+        }
     }
 
     // Append the HTML end
