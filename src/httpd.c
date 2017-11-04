@@ -80,7 +80,8 @@ const char* httpURL = "http://";
 const char* httpsURL = "https://";
 const char* database_filename = "database.ini";
 const int salt_len = 64;
-const int hash_iterations = 76132;
+//const int hash_iterations = 76132;
+const int hash_iterations = 5;
 
 FILE *log_file = NULL; // Log file pointer
 
@@ -353,13 +354,29 @@ void validate_authorization(struct http_request* request)
         error = NULL;
         gchar* stored_salt = g_key_file_get_string(keyfile, "salts", request->user->str, &error);
 
+        if(stored_salt == NULL)
+        {
+            g_free(stored_salt);
+            g_free(error->message);
+            g_free(error);
+            g_string_free(pass, TRUE);
+            g_key_file_free(keyfile);
+
+            request->authorization = UNAUTHORIZED;
+            return;
+        }
+
         error = NULL;
         gchar* stored_pass = g_key_file_get_string(keyfile, "passwords", request->user->str, &error);
         
-        if(stored_salt == NULL || stored_pass == NULL)
+        if(stored_pass == NULL)
         {
-            g_key_file_free(keyfile);
+            g_free(stored_salt);
+            g_free(stored_pass);
+            g_free(error->message);
+            g_free(error);
             g_string_free(pass, TRUE);
+            g_key_file_free(keyfile);
 
             request->authorization = UNAUTHORIZED;
             return;
@@ -490,42 +507,54 @@ void create_query_parameters_hashmap(struct http_request* request)
         return;
     }
 
-    gchar** queries = g_strsplit(query_part[1], "&", -1);
+    gchar** queries = g_strsplit(query_part[1], "#", -1);
 
     g_strfreev(query_part);
 
-    guint len = g_strv_length(queries);
+    gchar** invididual_queries = g_strsplit(queries[0], "&", -1);
+
+    g_strfreev(queries);
+
+    guint len = g_strv_length(invididual_queries);
 
     gchar** query_split = NULL;
 
     // Start at the first query parameter
     for(guint i = 0; i < len; i++)
-    {   
+    {  
         // Split the query parameter into key and value
-        query_split = g_strsplit(queries[i], "=", 2);
+        query_split = g_strsplit(invididual_queries[i], "=", 2);
 
         if (query_split == NULL)
         {
             continue;
         }
 
-        if (g_strv_length(query_split) == 2)
+        guint len = g_strv_length(query_split);
+
+        if (len == 2)
         {
             char* key = g_strdup(query_split[0]);
             char* value = g_strdup(query_split[1]);
 
             g_hash_table_insert(request->query_parameters, key, value);
         }
-        else
+        else if (len == 1 && query_split[0] != NULL)
         {
+            g_printf("No value\n");
+            g_printf("Key null: %d\n", query_split[0] == NULL);
             char* key = g_strdup(query_split[0]);
+            g_printf("Key duped\n");
 
             g_hash_table_insert(request->query_parameters, key, "");
+            g_printf("Key inserted\n");
         }
         
-        g_strfreev(query_split);
-
-        query_split = NULL;
+        if (query_split != NULL)
+        {
+            g_strfreev(query_split);
+            query_split = NULL;
+        }
     }
 
     if (query_split != NULL)
@@ -533,9 +562,9 @@ void create_query_parameters_hashmap(struct http_request* request)
         g_strfreev(query_split);
     }
 
-    if (queries != NULL)
+    if (invididual_queries != NULL)
     {
-        g_strfreev(queries);
+        g_strfreev(invididual_queries);
     }
 }
 
