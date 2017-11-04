@@ -115,7 +115,7 @@ If the users are allowed to choose their own passwords it could allow for unauth
 
 * Marcel Kyas
 * Richard Stallman
-* [HTTP State Management Mechanism - RFC ](https://tools.ietf.org/html/rfc6265)
+* [HTTP State Management Mechanism - RFC 6265](https://tools.ietf.org/html/rfc6265)
 * [Uniform Resource Identifier (URI): Generic Syntax - RFC 3986](https://tools.ietf.org/html/rfc3986)
 * [The 'Basic' HTTP Authentication Scheme - RFC 7617](https://tools.ietf.org/html/rfc7617)
 * [Authentication - RFC 7235](http://tools.ietf.org/html/rfc7235)
