@@ -7,6 +7,7 @@
 #include <sys/time.h>
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <ctype.h>
@@ -24,9 +25,11 @@
 #include <signal.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
+#include <openssl/sha.h>
 
 /* === Enums ===*/
 typedef enum { TEST, COLOR, LOGIN, SECRET, OTHER } page_type;
+typedef enum { AUTHORIZED, UNAUTHORIZED, NONE } authorization_type;
 
 /* === Structs === */
 struct client {
@@ -42,11 +45,13 @@ struct http_request {
     GHashTable* cookies;
     char* host;
     page_type page;
+    authorization_type authorization;
     GString* http_method;
     GString* requested_url;
     GString* http_version;
     GString* header;
     GString* body;
+    GString* user;
 };
 
 /* === Destroy functions === */
@@ -73,6 +78,9 @@ const char *html_start = "<!DOCTYPE html>\n<html lang=\"en\">\n\t<head>\n\t\t<ti
 const char *html_end = "\n\t</body>\n</html>\n";
 const char* httpURL = "http://";
 const char* httpsURL = "https://";
+const char* database_filename = "database.ini";
+const int salt_len = 64;
+const int hash_iterations = 76132;
 
 FILE *log_file = NULL; // Log file pointer
 
@@ -80,6 +88,76 @@ FILE *log_file = NULL; // Log file pointer
 bool VALID = false; // HTTP Parser valid flag, needs to be global
 extern void yyparse(); // HTTP Parser function call
 extern void yyrestart(FILE* input_file); // To reset the parser
+
+/*
+ * Generate a random string of a specified length
+ * Used for salting
+ */
+GString* random_string(int len)
+{
+    len = (len <= 0 ? 0 : len);
+    time_t t;
+
+    srand((unsigned) time(&t));
+
+    char* string = malloc(len * sizeof(char) + 1);
+    memset(string, 0, len * sizeof(char) + 1);
+
+    for (int i = 0; i < len; i++)
+    {
+        string[i] = ((rand() % (0x7F - 0x40)) + 0x40);
+    }
+
+    string[len] = '\0';
+
+    GString* str = g_string_new(string);
+
+    free(string);
+
+    return str;
+}
+
+/*
+ * Prepend a salt to a string and hash it n times
+ */
+GString* salt_and_hash(char* string, char* salt, int n)
+{
+    GString* joined = g_string_new(salt);
+    g_string_append(joined, string);
+
+    char buffer[129];
+    unsigned char hash[SHA512_DIGEST_LENGTH];
+    SHA512_CTX sha512;
+    SHA512_Init(&sha512);
+    SHA512_Update(&sha512, joined->str, joined->len);
+    SHA512_Final(hash, &sha512);
+
+    g_string_free(joined, TRUE);
+    
+    for(int i = 0; i < SHA512_DIGEST_LENGTH; i++)
+    {
+        sprintf(buffer + (i * 2), "%02x", hash[i]);
+    }
+
+    for (int i = 0; i < n; i++)
+    {
+        SHA512_CTX sha512;
+        SHA512_Init(&sha512);
+        SHA512_Update(&sha512, buffer, SHA512_DIGEST_LENGTH * 2);
+        SHA512_Final(hash, &sha512);
+        
+        for(int i = 0; i < SHA512_DIGEST_LENGTH; i++)
+        {
+            sprintf(buffer + (i * 2), "%02x", hash[i]);
+        }
+    }
+
+    buffer[128] = 0;
+
+    GString* final_hash = g_string_new(buffer);
+
+    return final_hash;
+}
 
 /*
  * Extract the IPv4 address form a struct sockaddr_in
@@ -188,6 +266,125 @@ void compress_array(bool* compress_arr, struct client* clients)
 }
 
 /*
+ * Extract the user name and password from a Basic Authorization header
+ */
+void get_basic_credentials(struct http_request request, GString** user, GString** pass)
+{
+    char* field = (char*) g_hash_table_lookup(request.header_fields, "authorization");
+
+    if (field == NULL)
+    {
+        return;
+    }
+
+    // Split the field
+    gchar** split = g_strsplit(field, " ", 2);
+
+    if (g_strv_length(split) != 2 || g_strcmp0(split[0], "Basic") != 0)
+    {
+        g_strfreev(split);
+        return;
+    }
+
+    gsize length;
+    guchar* decoded = g_base64_decode(split[1], &length);
+
+    g_strfreev(split);
+    split = NULL;
+
+    split = g_strsplit((char *) decoded, ":", 2);
+
+    g_free(decoded);
+
+    if (g_strv_length(split) != 2)
+    {
+        g_strfreev(split);
+        return;
+    }
+
+    *user = g_string_new(split[0]);
+    *pass = g_string_new(split[1]);
+
+    g_strfreev(split);
+}
+
+/*
+ * Check if the connection should be keep-alive
+ */
+void validate_authorization(struct http_request* request)
+{
+    if (request->page == LOGIN || request->page == SECRET)
+    {
+        GString* user = NULL;
+        GString* pass = NULL;
+
+        get_basic_credentials(*request, &user, &pass);
+
+        if (user == NULL || pass == NULL)
+        {
+            request->authorization = UNAUTHORIZED;
+            return;
+        }
+
+        request->user = user;
+
+        GKeyFile *keyfile = g_key_file_new();
+        GError* error = NULL;
+
+        if(!g_key_file_load_from_file(keyfile, "database.ini", G_KEY_FILE_NONE, &error))
+        {
+            g_printf("Could not load keyfile.");
+            if (error != NULL)
+            {
+                g_printf(" Error: %s\n", error->message);
+            }
+            else
+            {
+                g_printf(" errno: %d\n", errno);
+            }
+
+            g_key_file_free(keyfile);
+            g_string_free(user, TRUE);
+            g_string_free(pass, TRUE);
+
+            exit(1);
+        }
+        
+        error = NULL;
+        gchar* stored_salt = g_key_file_get_string(keyfile, "salts", request->user->str, &error);
+
+        error = NULL;
+        gchar* stored_pass = g_key_file_get_string(keyfile, "passwords", request->user->str, &error);
+        
+        if(stored_salt == NULL || stored_pass == NULL)
+        {
+            g_key_file_free(keyfile);
+            g_string_free(pass, TRUE);
+
+            request->authorization = UNAUTHORIZED;
+            return;
+        }
+
+        GString* hashed_pass = salt_and_hash(pass->str, stored_salt, hash_iterations);
+
+        if (g_strcmp0(hashed_pass->str, stored_pass) == 0)
+        {
+            request->authorization = AUTHORIZED;
+        }
+        else
+        {
+            request->authorization = UNAUTHORIZED;
+        }       
+
+        g_free(stored_salt);
+        g_free(stored_pass);
+        g_string_free(pass, TRUE);
+        g_string_free(hashed_pass, TRUE);
+        g_key_file_free(keyfile);
+    }
+}
+
+/*
  * Check if the connection should be keep-alive
  */
 bool is_keep_alive(struct http_request request)
@@ -235,8 +432,6 @@ void create_cookies_hashmap(struct http_request* request)
     // Split the cookie field to get individual cookies
     gchar** individual_cookies = g_strsplit(cookies, ";", -1);
 
-    g_printf("Number of query cookies: %d\n", g_strv_length(individual_cookies));
-
     guint len = g_strv_length(individual_cookies);
 
     gchar** cookie_split = NULL;
@@ -249,7 +444,6 @@ void create_cookies_hashmap(struct http_request* request)
 
         if (cookie_split == NULL)
         {
-            g_printf("Split null, ignoring\n");
             continue;
         }
 
@@ -258,14 +452,12 @@ void create_cookies_hashmap(struct http_request* request)
             char* key = g_strdup(cookie_split[0]);
             char* value = g_strdup(cookie_split[1]);
 
-            g_printf("Adding cookie '%s' with value '%s'\n", key, value);
             g_hash_table_insert(request->cookies, key, value);
         }
         else
         {
             char* key = g_strdup(cookie_split[0]);
 
-            g_printf("Adding cookie '%s' with empty string\n", key);
             g_hash_table_insert(request->cookies, key, "");
         }
         
@@ -292,8 +484,6 @@ void create_query_parameters_hashmap(struct http_request* request)
     // Split the URL to get the query part
     gchar** query_part = g_strsplit(request->requested_url->str, "?", 2);
 
-    g_printf("Number of query parameters: %d\n", g_strv_length(query_part));
-
     if (g_strv_length(query_part) != 2)
     {
         g_strfreev(query_part);
@@ -316,7 +506,6 @@ void create_query_parameters_hashmap(struct http_request* request)
 
         if (query_split == NULL)
         {
-            g_printf("Split null, ignoring\n");
             continue;
         }
 
@@ -325,14 +514,12 @@ void create_query_parameters_hashmap(struct http_request* request)
             char* key = g_strdup(query_split[0]);
             char* value = g_strdup(query_split[1]);
 
-            g_printf("Adding '%s' with value '%s'\n", key, value);
             g_hash_table_insert(request->query_parameters, key, value);
         }
         else
         {
             char* key = g_strdup(query_split[0]);
 
-            g_printf("Adding '%s' with empty string\n", key);
             g_hash_table_insert(request->query_parameters, key, "");
         }
         
@@ -377,8 +564,6 @@ void create_header_fields_hashmap(struct http_request* request)
         char* lowercased_key = g_ascii_strdown(field_split[0], -1);
         char* value = g_strstrip(g_strdup(field_split[1]));
 
-        g_printf("Adding header field '%s' with value '%s'\n", lowercased_key, value);
-
         g_hash_table_insert(request->header_fields, lowercased_key, value);
         
         g_strfreev(field_split);
@@ -394,7 +579,6 @@ bool is_page(char* page, char* url)
 {
     if (!g_str_has_prefix(url, page))
     {
-        g_printf("Prefix\n");
         return false;
     }
 
@@ -402,7 +586,6 @@ bool is_page(char* page, char* url)
 
     if (g_strv_length(split) != 2)
     {
-        g_printf("Split len\n");
         g_strfreev(split);
         return false;
     }
@@ -411,13 +594,13 @@ bool is_page(char* page, char* url)
 
     if (len == 1 && split[1][0] != '/' && split[1][0] != '?')
     {
-        g_printf("Len 1\n");
+        g_strfreev(split);
         return false;
     }
 
     if (2 <= len && !g_str_has_prefix(split[1], "/?") && !g_str_has_prefix(split[1], "?"))
     {
-        g_printf("Len 2\n");
+        g_strfreev(split);
         return false;
     }
 
@@ -482,21 +665,24 @@ bool parse_message(char* message, struct http_request* request)
     {
         gchar* lowercased = g_ascii_strdown(request->requested_url->str, -1);
 
-        g_printf("%s\n", request->requested_url->str);
-
         if (is_page("/test", request->requested_url->str))
         {
-            g_printf("TEST PAGE\n");
             request->page = TEST;
         }
         else if (is_page("/color", request->requested_url->str))
         {
-            g_printf("COLOR PAGE\n");
             request->page = COLOR;
+        }
+        else if (is_page("/login", request->requested_url->str))
+        {
+            request->page = LOGIN;
+        }
+        else if (is_page("/secret", request->requested_url->str))
+        {
+            request->page = SECRET;
         }
         else
         {
-            g_printf("OTHER PAGE\n");
             request->page = OTHER;
         }
 
@@ -511,6 +697,9 @@ bool parse_message(char* message, struct http_request* request)
 
     // Assign the HTTP version
     request->http_version = g_string_new(split[0]);
+
+    // Set authorization to NONE by default
+    request->authorization = NONE;
 
     g_strfreev(split);
 
@@ -726,6 +915,25 @@ void log_request(struct client client, struct http_request request, int status_c
         g_string_append_printf(log_message, " <%s> <%s> : <%d>", request.http_method->str, request.requested_url->str, status_code);
     }
 
+    if (request.authorization != NONE)
+    {
+        char* user = NULL;
+
+        if (request.user != NULL)
+        {
+            user = request.user->str;
+        }
+
+        if (request.authorization == AUTHORIZED)
+        {
+            g_string_append_printf(log_message, " %s authenticated", user);
+        }
+        else if (request.authorization == UNAUTHORIZED)
+        {
+            g_string_append_printf(log_message, " %s authentication error", user);
+        }
+    }
+
     // Log the message, the log file pointer should be open over the course of the program
     fprintf(log_file, "%s\n", log_message->str);
 
@@ -744,12 +952,10 @@ void handle_GET(int connfd, struct sockaddr_in server, struct client client, str
     // Send response
     if (client.ssl != NULL)
     {
-        g_printf("Sending to secure client...\n");
         SSL_write(client.ssl, response->str, response->len);
     }
     else
     {
-        g_printf("Sending to normal client...\n");
         send(connfd, response->str, response->len, 0);
     }
 
@@ -862,6 +1068,112 @@ void handle_bad_request(int connfd, struct client client, struct http_request re
 }
 
 /*
+ * Handles a unautharized request due to authorization error.
+ * Creates, sends the response and logs the request
+ */
+void handle_unautharized_request(int connfd, struct client client, struct http_request request)
+{
+    // Create response header
+    GString* response = create_header(HTTP_V1, 401, "Unauthorized");
+
+    // Add Connection: close if not a keep-alive
+    if (!client.keep_alive)
+    {
+        add_header_field(&response, "Connection", "close");
+    }
+    else
+    {
+        add_header_field(&response, "Connection", "keep-alive");
+    }
+
+    // Text content
+    char* text = "401 - Unauthorized\n";
+
+    // Add Content type 
+    add_header_field(&response, "Content-Type", "text/plain");
+
+    GString* len = g_string_new("");
+    g_string_printf(len, "%lu", strlen(text));
+
+    // Add Content length 
+    add_header_field(&response, "Content-Length", len->str);
+
+    // Add Authenticate 
+    add_header_field(&response, "WWW-Authenticate", "Basic realm=\"login\"");
+
+    g_string_append_printf(response, "\r\n\r\n%s", text);
+
+    // Send response
+    if (client.ssl != NULL)
+    {
+        SSL_write(client.ssl, response->str, response->len);
+    }
+    else
+    {
+        send(connfd, response->str, response->len, 0);
+    }
+
+    // Log request
+    log_request(client, request, 401);
+
+    g_string_free(len, TRUE);
+    g_string_free(response, TRUE);
+}
+
+/*
+ * Handles a forbidden request.
+ * Creates, sends the response and logs the request
+ */
+void handle_forbidden_request(int connfd, struct client client, struct http_request request)
+{
+    // Create response header
+    GString* response = create_header(HTTP_V1, 403, "Forbidden");
+    
+        // Add Connection: close if not a keep-alive
+        if (!client.keep_alive)
+        {
+            add_header_field(&response, "Connection", "close");
+        }
+        else
+        {
+            add_header_field(&response, "Connection", "keep-alive");
+        }
+    
+        // Text content
+        char* text = "403 - Forbidden\n";
+    
+        // Add Content type 
+        add_header_field(&response, "Content-Type", "text/plain");
+    
+        GString* len = g_string_new("");
+        g_string_printf(len, "%lu", strlen(text));
+    
+        // Add Content length 
+        add_header_field(&response, "Content-Length", len->str);
+    
+        // Add Authenticate 
+        add_header_field(&response, "WWW-Authenticate", "Basic realm=\"login\"");
+    
+        g_string_append_printf(response, "\r\n\r\n%s", text);
+    
+        // Send response
+        if (client.ssl != NULL)
+        {
+            SSL_write(client.ssl, response->str, response->len);
+        }
+        else
+        {
+            send(connfd, response->str, response->len, 0);
+        }
+    
+        // Log request
+        log_request(client, request, 403);
+    
+        g_string_free(len, TRUE);
+        g_string_free(response, TRUE);
+}
+
+/*
  * Serve a client
  * Validates and parses a request
  * Determines if a request is keep-alive
@@ -881,6 +1193,7 @@ void serve_client(int* client_fd, bool* compress_arr, struct sockaddr_in server,
     request.header = NULL;
     request.host = NULL;
     request.body = NULL;
+    request.user = NULL;
 
     char message[message_buffer_size];
     memset(&message, 0, sizeof(message));
@@ -890,38 +1203,34 @@ void serve_client(int* client_fd, bool* compress_arr, struct sockaddr_in server,
 
     if (client->ssl != NULL)
     {
-        g_printf("Serving secure client...\n");
         n = SSL_read(client->ssl, message, sizeof(message) - 1);
     }
     else
     {
-        g_printf("Serving normal client...\n");
         n = recv(*client_fd, message, sizeof(message) - 1, 0);
     }
 
     // Close if client sent an empty message
     if (n <= 0)
     {
-        g_printf("Closing client...\n");
         close_conn = true;
     }
     else
     {
-        g_printf("Validating client...\n");
         // Validate and parse
         bool valid = parse_message(message, &request);
         
         // Bad request if not valid
         if (!valid)
         {
-            g_printf("Invalid client...\n");
-            handle_bad_request(*client_fd, *client, request);
+            client->keep_alive = false;
             close_conn = true;
+            handle_bad_request(*client_fd, *client, request);
         }
         // Valid request
         else
         {
-            g_printf("Creating hashmaps...\n");
+            // Create hashmaps
             create_header_fields_hashmap(&request);
             create_query_parameters_hashmap(&request);
             create_cookies_hashmap(&request);
@@ -933,15 +1242,32 @@ void serve_client(int* client_fd, bool* compress_arr, struct sockaddr_in server,
             if (g_strcmp0(request.http_version->str, HTTP_V1) != 0 && g_strcmp0(request.http_version->str, HTTP_V0) != 0)
             {
                 handle_other(*client_fd, *client, request);
-                close_conn = true;
+            }
+            // Login or Secret page without SSL
+            else if (client->ssl == NULL && (request.page == LOGIN || request.page == SECRET))
+            {
+                handle_forbidden_request(*client_fd, *client, request);
             }
             else
             {
                 // Get the Host header field
                 request.host = (char*) g_hash_table_lookup(request.header_fields, "host");
+                
+                // Validate the authorization, if applicaple
+                validate_authorization(&request);
 
+                // Unauthorized if unauthorized for /login
+                if (request.authorization == UNAUTHORIZED && request.page == LOGIN)
+                {
+                    handle_unautharized_request(*client_fd, *client, request);
+                }
+                // Forbidden if unauthorized for /secret
+                else if (request.authorization == UNAUTHORIZED && request.page == SECRET)
+                {
+                    handle_forbidden_request(*client_fd, *client, request);
+                }
                 // GET Request
-                if (g_strcmp0(request.http_method->str, "GET") == 0)
+                else if (g_strcmp0(request.http_method->str, "GET") == 0)
                 {
                     handle_GET(*client_fd, server, *client, request);
                 }
@@ -959,7 +1285,6 @@ void serve_client(int* client_fd, bool* compress_arr, struct sockaddr_in server,
                 else
                 {
                     handle_other(*client_fd, *client, request);
-                    close_conn = true;
                 }
             }
 
@@ -986,6 +1311,11 @@ void serve_client(int* client_fd, bool* compress_arr, struct sockaddr_in server,
             if (request.http_version != NULL)
             {
                 g_string_free(request.http_version, TRUE);
+            }
+
+            if (request.user != NULL)
+            {
+                g_string_free(request.user, TRUE);
             }
 
             if (request.header_fields != NULL)
@@ -1152,13 +1482,11 @@ void check_clients(bool* compress_arr, struct client* clients, struct sockaddr_i
         // Add client if new connection
         if (fds[i].fd == fds[0].fd)
         {
-            g_printf("Adding normal client...\n");
             add_client(fds[0].fd, len, clients);
         }
         // Add client if new secure connection
         else if (fds[i].fd == fds[1].fd)
         {
-            g_printf("Adding secure client...\n");
             add_secure_client(fds[1].fd, len, clients);
         }
         // Serve client if existing connection
@@ -1209,6 +1537,9 @@ void run_loop(struct client* clients, struct sockaddr_in server)
     }
 }
 
+/*
+ * Configure SSL context
+ */
 void configure_context(SSL_CTX *ctx)
 {
     SSL_CTX_set_ecdh_auto(ctx, 1);
@@ -1225,6 +1556,9 @@ void configure_context(SSL_CTX *ctx)
     }
 }
 
+/*
+ * Create SSL context
+ */
 SSL_CTX *create_context()
 {
     const SSL_METHOD *method;
@@ -1240,6 +1574,43 @@ SSL_CTX *create_context()
     }
 
     return ctx;
+}
+
+/*
+ * Initilize the database if it doesn't exist
+ */
+void ensure_database()
+{
+    struct stat st;
+
+    if (stat(database_filename, &st) != 0)
+    {
+        GError* error = NULL;
+        GKeyFile *keyfile = g_key_file_new();
+
+        GString* salt = random_string(salt_len);
+        GString* hashed_pass = salt_and_hash("password", salt->str, hash_iterations);
+
+        g_key_file_set_string(keyfile, "salts", "admin", salt->str);
+        g_key_file_set_string(keyfile, "passwords", "admin", hashed_pass->str);
+    
+        if(!g_key_file_save_to_file(keyfile, database_filename, &error))
+        {
+            g_printf("Error inserting admin to database. Message: %s\n", error->message);
+
+            g_string_free(salt, TRUE);
+            g_string_free(hashed_pass, TRUE);
+            g_key_file_free(keyfile);
+
+            clean_up();
+
+            exit(1);
+        }
+        
+        g_string_free(salt, TRUE);
+        g_string_free(hashed_pass, TRUE);
+        g_key_file_free(keyfile);
+    }
 }
 
 /*
@@ -1271,6 +1642,9 @@ int main(int argc, char **argv)
         g_printf("Could not open log file.\nExiting...\n");
         return -1;
     }
+
+    // Ensure the database is accessible
+    ensure_database();
 
     // Assign the SIGINT signal handler for clean-up if CTRL-C
     signal(SIGINT, sigint_handler);
