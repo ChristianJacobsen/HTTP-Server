@@ -22,6 +22,8 @@
 #include <glib.h>
 #include <glib/gprintf.h>
 #include <signal.h>
+#include <openssl/ssl.h>
+#include <openssl/err.h>
 
 /* === Enums ===*/
 typedef enum { TEST, COLOR, LOGIN, SECRET, OTHER } page_type;
@@ -31,6 +33,7 @@ struct client {
     struct sockaddr_in sockaddr;
     gint64 last_heard;
     bool keep_alive;
+    SSL *ssl;
 };
 
 struct http_request {
@@ -59,14 +62,17 @@ const int max_listen = 64; // Maximum number of clients in the listen backlog
 const int recv_timeout_seconds = 5; // Timout of clients in recv calls
 const gint64 max_keep_alive_time = 30 * G_USEC_PER_SEC; // Maximum keep-alive time, 30 seconds in microseconds
 struct pollfd fds[max_connections]; // Poll file descriptors array for clients
-int nfds = 1; // Number of file descriptors in the fds array (number of clients)
+int nfds = 2; // Number of file descriptors in the fds array (number of clients)
 const int poll_timeout = (30 * 1000); // The timeout of the poll, 30 seconds
 const char* HTTP_V1 = "HTTP/1.1"; // HTTP version 1.1
 const char* HTTP_V0 = "HTTP/1.0"; // HTTP version 1.0
+SSL_CTX *ctx; // SSL Context
 const char *html_color_start = "<!DOCTYPE html>\n<html lang=\"en\">\n\t<head>\n\t\t<title>HTTP Server response</title>\n\t\t<meta charset=\"UTF-8\">\n\t\t<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\t</head>\n\t<body style=\"background-color:";
 const char *html_color_end = "\">\n\t</body>\n</html>\n";
 const char *html_start = "<!DOCTYPE html>\n<html lang=\"en\">\n\t<head>\n\t\t<title>HTTP Server response</title>\n\t\t<meta charset=\"UTF-8\">\n\t\t<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\t</head>\n\t<body>\n\t\t";
 const char *html_end = "\n\t</body>\n</html>\n";
+const char* httpURL = "http://";
+const char* httpsURL = "https://";
 
 FILE *log_file = NULL; // Log file pointer
 
@@ -99,7 +105,7 @@ void get_port(struct sockaddr_in addr, int *port)
  * Shutdown and close a specific function.
  * If compress array is not null, sets it to true
  */
-void close_connection(int *connfd, bool *compress_arr)
+void close_connection(int *connfd, struct client* client, bool *compress_arr)
 {
     shutdown(*connfd, SHUT_RDWR);
     close(*connfd);
@@ -108,6 +114,11 @@ void close_connection(int *connfd, bool *compress_arr)
     if (compress_arr != NULL)
     {
         *compress_arr = true;
+    }
+
+    if (client != NULL && client->ssl != NULL)
+    {
+        SSL_free(client->ssl);
     }
 }
 
@@ -120,7 +131,7 @@ void clean_up()
     {
         if (fds[i].fd >= 0)
         {
-            close_connection(&fds[i].fd, NULL);
+            close_connection(&fds[i].fd, NULL, NULL);
         }
     }
 
@@ -148,7 +159,7 @@ void check_keep_alives(struct client* clients, bool* compress_arr)
             // Close the connection if it matches or is above the maximum keep-alive time
             if (max_keep_alive_time <= diff)
             {
-                close_connection(&fds[i].fd, compress_arr);
+                close_connection(&fds[i].fd, &clients[i], compress_arr);
             }
         }
     }
@@ -581,7 +592,18 @@ GString* create_html(bool is_post, struct sockaddr_in server, struct client clie
         g_string_printf(client_URL, "%d.%d.%d.%d:%d", client_ip1, client_ip2, client_ip3, client_ip4, client_port);
 
         // Construct the initial body
-        g_string_printf(html, "%shttp://%s%s %s", html_start, server_URL->str, request.requested_url->str, client_URL->str);
+        g_string_printf(html, "%s", html_start);
+
+        if (client.ssl != NULL)
+        {
+            g_string_append_printf(html, "%s", httpsURL);
+        }
+        else
+        {
+            g_string_append_printf(html, "%s", httpURL);
+        }
+
+        g_string_append_printf(html, "%s%s %s", server_URL->str, request.requested_url->str, client_URL->str);
 
         // Append a custom body if post
         if (is_post)
@@ -720,7 +742,16 @@ void handle_GET(int connfd, struct sockaddr_in server, struct client client, str
     GString* response = create_response(false, false, server, client, request);
 
     // Send response
-    send(connfd, response->str, response->len, 0);
+    if (client.ssl != NULL)
+    {
+        g_printf("Sending to secure client...\n");
+        SSL_write(client.ssl, response->str, response->len);
+    }
+    else
+    {
+        g_printf("Sending to normal client...\n");
+        send(connfd, response->str, response->len, 0);
+    }
 
     // Log request
     log_request(client, request, 200);
@@ -738,7 +769,14 @@ void handle_HEAD(int connfd, struct sockaddr_in server, struct client client, st
     GString* response = create_response(true, false, server, client, request);
 
     // Send response
-    send(connfd, response->str, response->len, 0);
+    if (client.ssl != NULL)
+    {
+        SSL_write(client.ssl, response->str, response->len);
+    }
+    else
+    {
+        send(connfd, response->str, response->len, 0);
+    }
 
     // Log request
     log_request(client, request, 200);
@@ -756,7 +794,14 @@ void handle_POST(int connfd, struct sockaddr_in server, struct client client, st
     GString* response = create_response(false, true, server, client, request);
 
     // Send response
-    send(connfd, response->str, response->len, 0);
+    if (client.ssl != NULL)
+    {
+        SSL_write(client.ssl, response->str, response->len);
+    }
+    else
+    {
+        send(connfd, response->str, response->len, 0);
+    }
 
     // Log request
     log_request(client, request, 200);
@@ -775,7 +820,14 @@ void handle_other(int connfd, struct client client, struct http_request request)
     g_string_append_printf(response, "\r\n");
 
     // Send response
-    send(connfd, response->str, response->len, 0);
+    if (client.ssl != NULL)
+    {
+        SSL_write(client.ssl, response->str, response->len);
+    }
+    else
+    {
+        send(connfd, response->str, response->len, 0);
+    }
 
     // Log request
     log_request(client, request, 501);
@@ -794,7 +846,14 @@ void handle_bad_request(int connfd, struct client client, struct http_request re
     g_string_append_printf(response, "\r\n");
 
     // Send response
-    send(connfd, response->str, response->len, 0);
+    if (client.ssl != NULL)
+    {
+        SSL_write(client.ssl, response->str, response->len);
+    }
+    else
+    {
+        send(connfd, response->str, response->len, 0);
+    }
 
     // Log request
     log_request(client, request, 400);
@@ -827,27 +886,42 @@ void serve_client(int* client_fd, bool* compress_arr, struct sockaddr_in server,
     memset(&message, 0, sizeof(message));
     
     // Get data from client
-    ssize_t n = recv(*client_fd, message, sizeof(message) - 1, 0);
+    ssize_t n = 0;
+
+    if (client->ssl != NULL)
+    {
+        g_printf("Serving secure client...\n");
+        n = SSL_read(client->ssl, message, sizeof(message) - 1);
+    }
+    else
+    {
+        g_printf("Serving normal client...\n");
+        n = recv(*client_fd, message, sizeof(message) - 1, 0);
+    }
 
     // Close if client sent an empty message
     if (n <= 0)
     {
+        g_printf("Closing client...\n");
         close_conn = true;
     }
     else
     {
+        g_printf("Validating client...\n");
         // Validate and parse
         bool valid = parse_message(message, &request);
         
         // Bad request if not valid
         if (!valid)
         {
+            g_printf("Invalid client...\n");
             handle_bad_request(*client_fd, *client, request);
             close_conn = true;
         }
         // Valid request
         else
         {
+            g_printf("Creating hashmaps...\n");
             create_header_fields_hashmap(&request);
             create_query_parameters_hashmap(&request);
             create_cookies_hashmap(&request);
@@ -934,7 +1008,7 @@ void serve_client(int* client_fd, bool* compress_arr, struct sockaddr_in server,
     // Close a connection if flag is set
     if (close_conn)
     {
-        close_connection(client_fd, compress_arr);
+        close_connection(client_fd, client, compress_arr);
     }
     // Do not close connection
     else
@@ -942,6 +1016,58 @@ void serve_client(int* client_fd, bool* compress_arr, struct sockaddr_in server,
         // Store the current time for this client
         client->last_heard = g_get_real_time();
     }
+}
+
+/*
+ * Add a new client
+ * Determines if the client buffer is full and if so, rejects the client.
+ */
+void add_secure_client(int sockfd, socklen_t len, struct client* clients)
+{
+    // Accept a client
+    int connfd = accept(sockfd, (struct sockaddr *)&clients[nfds].sockaddr, &len);
+
+    // Check for error
+    if (connfd < 0)
+    {
+        // If not timeout, something went horribly wrong
+        if (errno != EWOULDBLOCK)
+        {
+            printf("accept failed. Unknown error. errno: %d\nExiting...\n", errno);
+            clean_up();
+        }
+
+        return;
+    }
+
+    // At maximum capacity, reject client
+    if (nfds == max_connections - 1)
+    {
+        close_connection(&connfd, NULL, NULL);
+
+        return;
+    }
+
+    clients[nfds].ssl = SSL_new(ctx);
+    SSL_set_fd(clients[nfds].ssl, connfd);
+
+    if (SSL_accept(clients[nfds].ssl) <= 0)
+    {
+        close_connection(&connfd, &clients[nfds], NULL);
+    }
+
+    // Set the recv timeout
+    struct timeval timeout;
+    timeout.tv_sec = recv_timeout_seconds;
+    timeout.tv_usec = 0;
+    setsockopt(connfd, SOL_SOCKET, SO_RCVTIMEO, (char *)&timeout, sizeof(timeout));
+
+    // Add the client
+    clients[nfds].keep_alive = false;
+    clients[nfds].last_heard = 0;
+    fds[nfds].fd = connfd;
+    fds[nfds].events = POLLIN;
+    nfds++;
 }
 
 /*
@@ -969,7 +1095,7 @@ void add_client(int sockfd, socklen_t len, struct client* clients)
     // At maximum capacity, reject client
     if (nfds == max_connections - 1)
     {
-        close_connection(&connfd, NULL);
+        close_connection(&connfd, NULL, NULL);
 
         return;
     }
@@ -982,6 +1108,7 @@ void add_client(int sockfd, socklen_t len, struct client* clients)
 
     // Add the client
     clients[nfds].keep_alive = false;
+    clients[nfds].ssl = NULL;
     clients[nfds].last_heard = 0;
     fds[nfds].fd = connfd;
     fds[nfds].events = POLLIN;
@@ -991,7 +1118,7 @@ void add_client(int sockfd, socklen_t len, struct client* clients)
 /*
  * Check all the clients for activity
  */
-void check_clients(bool* compress_arr, struct client* clients, struct sockaddr_in server, int sockfd)
+void check_clients(bool* compress_arr, struct client* clients, struct sockaddr_in server)
 {
     int current_size = nfds;
     bool close_conn = false;
@@ -1017,15 +1144,22 @@ void check_clients(bool* compress_arr, struct client* clients, struct sockaddr_i
         // Close connection if flag is set and move onto the next client
         if (close_conn)
         {
-            close_connection(&fds[i].fd, compress_arr);
+            close_connection(&fds[i].fd, &clients[i], compress_arr);
 
             continue;
         }
 
         // Add client if new connection
-        if (fds[i].fd == sockfd)
+        if (fds[i].fd == fds[0].fd)
         {
-            add_client(sockfd, len, clients);
+            g_printf("Adding normal client...\n");
+            add_client(fds[0].fd, len, clients);
+        }
+        // Add client if new secure connection
+        else if (fds[i].fd == fds[1].fd)
+        {
+            g_printf("Adding secure client...\n");
+            add_secure_client(fds[1].fd, len, clients);
         }
         // Serve client if existing connection
         else
@@ -1045,7 +1179,7 @@ void check_clients(bool* compress_arr, struct client* clients, struct sockaddr_i
  * Run the server loop
  * Polls for activity, adds and serves clients
  */
-void run_loop(struct client* clients, struct sockaddr_in server, int sockfd)
+void run_loop(struct client* clients, struct sockaddr_in server)
 {
     bool compress_arr = false;
     
@@ -1070,9 +1204,42 @@ void run_loop(struct client* clients, struct sockaddr_in server, int sockfd)
         // Check the clients if poll did not timeout
         if (poll_value != 0)
         {
-            check_clients(&compress_arr, clients, server, sockfd);
+            check_clients(&compress_arr, clients, server);
         }
     }
+}
+
+void configure_context(SSL_CTX *ctx)
+{
+    SSL_CTX_set_ecdh_auto(ctx, 1);
+
+    // Set the key and cert
+    if (SSL_CTX_use_certificate_file(ctx, "../cert.pem", SSL_FILETYPE_PEM) <= 0) {
+        ERR_print_errors_fp(stderr);
+	    exit(1);
+    }
+
+    if (SSL_CTX_use_PrivateKey_file(ctx, "../key.pem", SSL_FILETYPE_PEM) <= 0 ) {
+        ERR_print_errors_fp(stderr);
+	    exit(1);
+    }
+}
+
+SSL_CTX *create_context()
+{
+    const SSL_METHOD *method;
+    SSL_CTX *ctx;
+
+    method = SSLv23_server_method();
+
+    ctx = SSL_CTX_new(method);
+    if (!ctx) {
+        perror("Unable to create SSL context");
+        ERR_print_errors_fp(stderr);
+        exit(1);
+    }
+
+    return ctx;
 }
 
 /*
@@ -1091,9 +1258,9 @@ void sigint_handler()
 int main(int argc, char **argv)
 {
     // Verify arguments
-    if (argc != 2)
+    if (argc != 3)
     {
-        g_printf("Incorrect number of arguments.\nSpecify port number.\nExiting...\n");
+        g_printf("Incorrect number of arguments.\nSpecify port number(s).\nExiting...\n");
         return -1;
     }
 
@@ -1108,26 +1275,49 @@ int main(int argc, char **argv)
     // Assign the SIGINT signal handler for clean-up if CTRL-C
     signal(SIGINT, sigint_handler);
 
-    int port = atoi(argv[1]); // The port
+    int port = atoi(argv[1]); // The unencrypted communication port
+    int port_secure = atoi(argv[2]); // The encrypted communication port
     int sockfd; // The Listen socket
+    int sockfd_secure; // The secure Listen socket
     int on = 1; // Only uses for setting SO_REUSEADDR on the listen socket
     struct sockaddr_in server; // The server sockaddr
+    struct sockaddr_in server_secure; // The secure server sockaddr
 
     struct client clients[max_connections]; // Client sockaddr's
-   //gint64 keep_alive_times[max_connections]; // Keep-alive times for client
 
-    // Create and bind a TCP socket.
+    SSL_library_init(); // load encryption & hash algorithms for SSL            
+    SSL_load_error_strings(); // load the error strings for good error reporting
+    ctx = create_context();
+    configure_context(ctx);
+
+    // Create and bind the TCP socket.
     sockfd = socket(AF_INET, SOCK_STREAM, 0);
     if (sockfd < 0)
     {
-        g_printf("Unable to bind the socket. errno: %d\nExiting...\n", errno);
+        g_printf("Unable to create the socket. errno: %d\nExiting...\n", errno);
+        return -1;
+    }
+
+    // Create and bind the secure TCP socket.
+    sockfd_secure = socket(AF_INET, SOCK_STREAM, 0);
+    if (sockfd_secure < 0)
+    {
+        g_printf("Unable to create the secure socket. errno: %d\nExiting...\n", errno);
         return -1;
     }
 
     // Allow the listen socket to be re-usable
     if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, (char *)&on, sizeof(on)) < 0)
     {
-        g_printf("setsockopt failed. errno: %d\nExiting...\n", errno);
+        g_printf("setsockopt failed for socket. errno: %d\nExiting...\n", errno);
+        close(sockfd);
+        return -1;
+    }
+
+    // Allow the secure listen socket to be re-usable
+    if (setsockopt(sockfd_secure, SOL_SOCKET, SO_REUSEADDR, (char *)&on, sizeof(on)) < 0)
+    {
+        g_printf("setsockopt failed for secure socket. errno: %d\nExiting...\n", errno);
         close(sockfd);
         return -1;
     }
@@ -1136,7 +1326,16 @@ int main(int argc, char **argv)
     // that originate from this socket
     if (ioctl(sockfd, FIONBIO, (char *)&on) < 0)
     {
-        g_printf("ioctl failed. errno: %d\nExiting...\n", errno);
+        g_printf("ioctl failed for socket. errno: %d\nExiting...\n", errno);
+        close(sockfd);
+        exit(-1);
+    }
+
+    // Set the listening socket to be non-blocking as well as other connections
+    // that originate from this socket
+    if (ioctl(sockfd_secure, FIONBIO, (char *)&on) < 0)
+    {
+        g_printf("ioctl failed for secure socker. errno: %d\nExiting...\n", errno);
         close(sockfd);
         exit(-1);
     }
@@ -1146,6 +1345,12 @@ int main(int argc, char **argv)
     server.sin_family = AF_INET;
     server.sin_addr.s_addr = htonl(INADDR_ANY);
     server.sin_port = htons(port);
+
+    // Set the secure server configurations
+    memset(&server_secure, 0, sizeof(server_secure));
+    server_secure.sin_family = AF_INET;
+    server_secure.sin_addr.s_addr = htonl(INADDR_ANY);
+    server_secure.sin_port = htons(port_secure);
 
     // Bind the socket
     if (bind(sockfd, (struct sockaddr *)&server, (socklen_t)sizeof(server)) != 0)
@@ -1164,10 +1369,35 @@ int main(int argc, char **argv)
         }
     }
 
+    // Bind the secure socket
+    if (bind(sockfd_secure, (struct sockaddr *)&server_secure, (socklen_t)sizeof(server_secure)) != 0)
+    {
+        // Port in use
+        if (errno == EADDRINUSE)
+        {
+            g_printf("Secure port number already in use: %d\n", port);
+            return -1;
+        }
+        // Unknown error
+        else
+        {
+            g_printf("Unknown error binding the secure socket. errno: %d\n", errno);
+            return -1;
+        }
+    }
+
     // Before the server can accept messages, it has to listen to the welcome port.
     if (listen(sockfd, max_listen) < 0)
     {
         g_printf("listen failed. errno: %d\nExiting...\n", errno);
+        close(sockfd);
+        return -1;
+    }
+
+    // Before the secure server can accept messages, it has to listen to the welcome port.
+    if (listen(sockfd_secure, max_listen) < 0)
+    {
+        g_printf("secure listen failed. errno: %d\nExiting...\n", errno);
         close(sockfd);
         return -1;
     }
@@ -1181,11 +1411,15 @@ int main(int argc, char **argv)
     fds[0].fd = sockfd;
     fds[0].events = POLLIN;
 
+    // Set the listening secure socket
+    fds[1].fd = sockfd_secure;
+    fds[1].events = POLLIN;
+
     // Notify that the server is ready
-    g_printf("Listening on port %d...\n", port);
+    g_printf("Listening on port %d and %d...\n", port, port_secure);
 
     // Run the server loop
-    run_loop(clients, server, sockfd);
+    run_loop(clients, server);
 
     // Clean up the server if control reaches here
     clean_up();
