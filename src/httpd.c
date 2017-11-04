@@ -541,13 +541,10 @@ void create_query_parameters_hashmap(struct http_request* request)
         }
         else if (len == 1 && query_split[0] != NULL)
         {
-            g_printf("No value\n");
-            g_printf("Key null: %d\n", query_split[0] == NULL);
             char* key = g_strdup(query_split[0]);
-            g_printf("Key duped\n");
+            char* value = g_strdup("");
 
-            g_hash_table_insert(request->query_parameters, key, "");
-            g_printf("Key inserted\n");
+            g_hash_table_insert(request->query_parameters, key, value);
         }
         
         if (query_split != NULL)
@@ -1819,7 +1816,7 @@ int main(int argc, char **argv)
     fds[1].events = POLLIN;
 
     // Notify that the server is ready
-    g_printf("Listening on port %d and %d...\n", port, port_secure);
+    g_printf("Listening on ports %d and %d...\n", port, port_secure);
 
     // Run the server loop
     run_loop(clients, server);
