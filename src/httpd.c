@@ -377,15 +377,12 @@ void validate_authorization(struct http_request* request)
         }
         
         // Get the salt for the user
-        error = NULL;
-        gchar* stored_salt = g_key_file_get_string(keyfile, "salts", request->user->str, &error);
+        gchar* stored_salt = g_key_file_get_string(keyfile, "salts", request->user->str, NULL);
 
         // Unauthorized if salt is missing
         if(stored_salt == NULL)
         {
             g_free(stored_salt);
-            g_free(error->message);
-            g_free(error);
             g_string_free(pass, TRUE);
             g_key_file_free(keyfile);
 
@@ -394,16 +391,13 @@ void validate_authorization(struct http_request* request)
         }
 
         // Get the stored password hash for the user
-        error = NULL;
-        gchar* stored_pass = g_key_file_get_string(keyfile, "passwords", request->user->str, &error);
+        gchar* stored_pass = g_key_file_get_string(keyfile, "passwords", request->user->str, NULL);
         
         // Unauthorized if password is missing
         if(stored_pass == NULL)
         {
             g_free(stored_salt);
             g_free(stored_pass);
-            g_free(error->message);
-            g_free(error);
             g_string_free(pass, TRUE);
             g_key_file_free(keyfile);
 
